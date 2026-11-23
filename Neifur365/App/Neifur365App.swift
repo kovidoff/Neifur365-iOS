@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct Neifur365App: App {
     @StateObject private var container = AppContainer()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -11,8 +12,14 @@ struct Neifur365App: App {
                 .environmentObject(container.prefs)
                 .environmentObject(container.account)
                 .environmentObject(container.lists)
+                .environmentObject(container.downloads)
                 .preferredColorScheme(.dark)
                 .tint(Nf.violet)
+        }
+        .onChange(of: scenePhase) { phase in
+            if phase == .background {
+                container.alerts.scheduleNextCheck()
+            }
         }
     }
 }

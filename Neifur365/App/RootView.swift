@@ -28,6 +28,7 @@ enum RootTab: String, CaseIterable, Identifiable {
 }
 
 struct RootView: View {
+    @EnvironmentObject private var downloads: DownloadManager
     @State private var selectedTab: RootTab = .home
 
     var body: some View {
@@ -44,60 +45,19 @@ struct RootView: View {
                 }
                 .tag(RootTab.library)
 
-            StagePlaceholderTab(
-                title: "Каталог",
-                icon: "square.grid.2x2",
-                stageLabel: "Этап 3",
-                description: "Фильтры по типу, статусу, жанрам, году и расписание онгоингов Shikimori появятся на следующем этапе."
-            )
-            .tabItem {
-                Label(RootTab.catalog.title, systemImage: RootTab.catalog.icon)
-            }
-            .tag(RootTab.catalog)
+            CatalogScreen()
+                .tabItem {
+                    Label(RootTab.catalog.title, systemImage: RootTab.catalog.icon)
+                }
+                .tag(RootTab.catalog)
 
-            StagePlaceholderTab(
-                title: "Загрузки",
-                icon: "arrow.down.circle",
-                stageLabel: "Этап 5",
-                description: "Фоновое скачивание серий вместе с .ass-субтитрами для просмотра офлайн."
-            )
-            .tabItem {
-                Label(RootTab.downloads.title, systemImage: RootTab.downloads.icon)
-            }
-            .tag(RootTab.downloads)
+            DownloadsScreen()
+                .tabItem {
+                    Label(RootTab.downloads.title, systemImage: RootTab.downloads.icon)
+                }
+                .badge(downloads.activeCount)
+                .tag(RootTab.downloads)
         }
         .tint(Nf.violet)
-    }
-}
-
-private struct StagePlaceholderTab: View {
-    let title: String
-    let icon: String
-    let stageLabel: String
-    let description: String
-
-    var body: some View {
-        NavigationStack {
-            VStack(spacing: 12) {
-                Image(systemName: icon)
-                    .font(.system(size: 46))
-                    .foregroundColor(Nf.violet)
-                Text(stageLabel)
-                    .font(NfType.overline)
-                    .foregroundColor(Nf.mint)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .background(Nf.mint.opacity(0.14), in: Capsule())
-                Text(description)
-                    .font(NfType.body)
-                    .foregroundColor(Nf.textDim)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 32)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Nf.ink.ignoresSafeArea())
-            .navigationTitle(title)
-            .navigationBarTitleDisplayMode(.large)
-        }
     }
 }

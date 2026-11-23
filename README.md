@@ -1,14 +1,19 @@
 # Neifur 365 (iOS)
 
-Неофициальный iOS-клиент для **Anime 365** и **Shikimori** на **Swift + SwiftUI**.
-Порт Android-приложения [Neifur 365](https://github.com/kovidoff/Neifur365) — без рекламы, трекеров и собственного сервера.
+Неофициальный iOS-клиент для **Anime 365** и **Shikimori** на **Swift + SwiftUI + libmpv**, оформленный по Apple Human Interface Guidelines с поддержкой **Liquid Glass** (iOS 26/27).
+
+## Возможности
+- **Плеер на `libmpv` (Metal / VideoToolbox):** выбор качества (`1080p`/`720p`/`360p`), озвучек и `.ass`-субтитров со шрифтом `subfont.ttf`, скорость воспроизведения + удержание `2×`, пропуск опенинга `+85 с`, жесты яркости/громкости, режимы кадра, таймер сна, блокировка экрана, управление с наушников, автоотметка просмотренных серий.
+- **Офлайн-просмотр:** фоновая загрузка серий (по одной или пакетом `+3`) вместе с `.ass`-субтитрами, выбор качества скачивания, автоудаление просмотренных и воспроизведение без интернета.
+- **Списки и любимые студии:** синхронизация с Anime 365, вход по паролю или через сайт (`WKWebView` для VK/Google/Shikimori), Keychain-сессия общая для всех зеркал, звёздочки ★ любимых студий.
+- **Каталог, расписание и уведомления:** живой поиск, фильтры (онгоинги, тип, 73 жанра, год), расписание онгоингов Shikimori на 7 дней по локальному времени, кадры, персонажи, трейлеры, связанные сезоны, тест видеоканалов и зеркал, фоновые уведомления о новых сериях.
 
 ## Сборка
 
-Проект описывается через `project.yml` ([XcodeGen](https://github.com/yonaskolb/XcodeGen)) и автоматически собирается в **GitHub Actions** на `macos-latest`:
-- прогоняются юнит-тесты (`Neifur365Tests`) на iOS Simulator;
-- собирается неподписанный `Neifur365.ipa` (готов к подписи в Gbox / Feather / ESign / SideStore / Sideloadly) и загружается в артефакты запуска Actions.
+Проект описывается в `project.yml` ([XcodeGen](https://github.com/yonaskolb/XcodeGen)) и собирается в GitHub Actions на `macos-26` (Xcode 26):
+- прогоняются юнит-тесты (`Neifur365Tests`);
+- собирается неподписанный `Neifur365.ipa` (готов к подписи в Gbox / Feather / SideStore / Sideloadly) и публикуется в [релиз `dev`](https://github.com/kovidoff/Neifur365-iOS/releases/tag/dev).
 
 ## Лицензия
 
-Исходный код распространяется по лицензии **[GNU General Public License v3.0](LICENSE)**.
+**[GNU General Public License v3.0](LICENSE)**

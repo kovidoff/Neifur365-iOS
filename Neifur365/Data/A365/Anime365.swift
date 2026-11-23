@@ -446,12 +446,64 @@ final class Anime365Client {
         }
     }
 
+    func byMyAnimeList(_ malId: Int64) async throws -> Series? {
+        let list = try await api("/series?myAnimeListId=\(malId)&fields=\(Self.cardFields)&limit=1", as: [Series].self)
+        return list.first
+    }
+
+    func translations(episodeIds: [Int64]) async throws -> [Translation] {
+        let unique = Array(Set(episodeIds))
+        guard !unique.isEmpty else { return [] }
+        let fields = "id,episodeId,type,typeKind,typeLang,authorsSummary,height,priority,isActive,qualityType"
+        let chunks = stride(from: 0, to: unique.count, by: 20).map {
+            Array(unique[$0..<min($0 + 20, unique.count)])
+        }
+        var all: [Translation] = []
+        for batchStart in stride(from: 0, to: chunks.count, by: 3) {
+            let batch = chunks[batchStart..<min(batchStart + 3, chunks.count)]
+            let batchResult = try await withThrowingTaskGroup(of: [Translation].self) { group in
+                for chunk in batch {
+                    group.addTask {
+                        let idParams = chunk.map { "episodeId[]=\($0)" }.joined(separator: "&")
+                        var out: [Translation] = []
+                        var offset = 0
+                        while true {
+                            let page = try await self.api(
+                                "/translations?limit=1000&offset=\(offset)&fields=\(fields)&\(idParams)",
+                                as: [Translation].self
+                            )
+                            out.append(contentsOf: page)
+                            if page.count < 1000 { break }
+                            offset += page.count
+                        }
+                        return out
+                    }
+                }
+                var combined: [Translation] = []
+                for try await items in group { combined.append(contentsOf: items) }
+                return combined
+            }
+            all.append(contentsOf: batchResult)
+        }
+        return all
+    }
+
     func episode(id: Int64) async throws -> Episode {
         try await api("/episodes/\(id)", as: Episode.self)
     }
 
     func embed(translationId: Int64) async throws -> Embed {
         try await api("/translations/embed/\(translationId)", as: Embed.self)
+    }
+
+    func subtitles(url: String) async throws -> String {
+        try await mirrored { base in
+            let resolved = SitePages.resolve(base: base, url: url)
+            guard let target = URL(string: resolved) else {
+                throw ApiError("Некорректная ссылка на субтитры")
+            }
+            return try await fetchText(makeRequest(url: target))
+        }
     }
 
     // MARK: - Account & Lists
@@ -539,5 +591,36 @@ final class Anime365Client {
         if !ok {
             throw ApiError("Anime 365 не переключил канал")
         }
+    }
+
+    /// Measures download throughput of a video channel using a 2 MB ranged probe.
+    func measure(channel: VideoChannel, maxBytes: Int64 = 2_097_152) async -> ChannelSpeed {
+        func measureUrl(_ rawUrl: String) async -> Double {
+            let sep = rawUrl.contains("?") ? "&" : "?"
+            let busted = "\(rawUrl)\(sep)_=\(Int(Date().timeIntervalSince1970 * 1000))"
+            guard let url = URL(string: busted) else { return 0 }
+            var req = URLRequest(url: url)
+            req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+            req.setValue("bytes=0-\(maxBytes - 1)", forHTTPHeaderField: "Range")
+            req.timeoutInterval = 7
+
+            let start = CFAbsoluteTimeGetCurrent()
+            do {
+                let (data, resp) = try await probeSession.data(for: req)
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                guard (200...299).contains(code) else { return 0 }
+                let elapsed = max(CFAbsoluteTimeGetCurrent() - start, 0.05)
+                return Double(data.count) / elapsed
+            } catch {
+                return 0
+            }
+        }
+
+        let primary = await measureUrl(channel.testUrl)
+        if primary < ChannelSpeed.worksThreshold, let fallback = channel.fallbackUrl {
+            let fb = await measureUrl(fallback)
+            return ChannelSpeed(bytesPerSec: max(primary, fb))
+        }
+        return ChannelSpeed(bytesPerSec: primary)
     }
 }

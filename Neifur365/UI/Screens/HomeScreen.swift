@@ -43,15 +43,22 @@ struct HomeScreen: View {
     @EnvironmentObject private var account: AccountStore
     @EnvironmentObject private var lists: ListsStore
     @EnvironmentObject private var prefs: Prefs
+    @EnvironmentObject private var downloads: DownloadManager
 
     @StateObject private var vm = HomeViewModel()
     @State private var heroIndex = 0
     @State private var showSettings = false
     @State private var showSignIn = false
     @State private var editingSeries: Series?
+    @State private var offlinePlayerRequest: PlayerLaunchRequest?
 
     private var freshWatching: [ListedTitle] {
         lists.watching(history: prefs.history).filter { $0.behind > 0 && $0.series != nil }
+    }
+
+    private var continueItems: [WatchEntry] {
+        var seen = Set<String>()
+        return prefs.history.filter { seen.insert($0.animeId).inserted }.prefix(12).map { $0 }
     }
 
     var body: some View {
@@ -69,30 +76,19 @@ struct HomeScreen: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(Nf.ink.ignoresSafeArea())
                 } else if let err = vm.errorMessage {
-                    VStack(spacing: 14) {
-                        Image(systemName: "wifi.slash")
-                            .font(.system(size: 38))
-                            .foregroundColor(Nf.textMute)
-                        Text("Не получилось загрузить каталог")
-                            .font(.headline)
-                            .foregroundColor(Nf.text)
-                        Text(err)
-                            .font(.subheadline)
-                            .foregroundColor(Nf.textDim)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 28)
-                        Button("Повторить") {
-                            Task { await vm.load(using: app.a365, force: true) }
-                        }
-                        .buttonStyle(.borderedProminent)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Nf.ink.ignoresSafeArea())
+                    offlineOrErrorView(err)
                 }
             }
             .navigationTitle("Neifur 365")
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    NavigationLink(value: ScheduleRoute()) {
+                        Image(systemName: "calendar")
+                    }
+                    .accessibilityLabel("Расписание онгоингов")
+                }
+
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
                         showSettings = true
@@ -110,6 +106,9 @@ struct HomeScreen: View {
             .navigationDestination(for: AnimeRoute.self) { route in
                 AnimePreviewScreen(route: route)
             }
+            .navigationDestination(for: ScheduleRoute.self) { _ in
+                ScheduleScreen()
+            }
             .sheet(isPresented: $showSettings) {
                 SettingsSheet()
             }
@@ -119,6 +118,9 @@ struct HomeScreen: View {
             .sheet(item: $editingSeries) { s in
                 ListEditorSheet(seriesId: s.id, title: s.title, series: s, current: lists.get(s.id))
             }
+            .fullScreenCover(item: $offlinePlayerRequest) { req in
+                PlayerScreen(request: req, app: app)
+            }
             .task {
                 await vm.load(using: app.a365)
             }
@@ -127,6 +129,69 @@ struct HomeScreen: View {
                     lists.refreshIfStale()
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func offlineOrErrorView(_ err: String) -> some View {
+        let offlineGroups = downloads.byAnime.filter { $0.readyCount > 0 }
+        if offlineGroups.isEmpty && continueItems.isEmpty {
+            VStack(spacing: 14) {
+                Image(systemName: "wifi.slash")
+                    .font(.system(size: 38))
+                    .foregroundColor(Nf.textMute)
+                Text("Не получилось загрузить каталог")
+                    .font(.headline)
+                    .foregroundColor(Nf.text)
+                Text(err)
+                    .font(.subheadline)
+                    .foregroundColor(Nf.textDim)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 28)
+                Button("Повторить") {
+                    Task { await vm.load(using: app.a365, force: true) }
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Nf.ink.ignoresSafeArea())
+        } else {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 22) {
+                    HStack(spacing: 12) {
+                        Image(systemName: "wifi.slash")
+                            .foregroundColor(Nf.amber)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Нет связи с Anime 365")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundColor(Nf.text)
+                            Text(err)
+                                .font(.caption)
+                                .foregroundColor(Nf.textDim)
+                                .lineLimit(2)
+                        }
+                        Spacer()
+                        Button("Повторить") {
+                            Task { await vm.load(using: app.a365, force: true) }
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .padding(14)
+                    .background(Nf.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .padding(.horizontal, 16)
+
+                    if !offlineGroups.isEmpty {
+                        offlineSection(offlineGroups)
+                    }
+
+                    if !continueItems.isEmpty {
+                        continueSection
+                    }
+                }
+                .padding(.top, 10)
+                .padding(.bottom, 32)
+            }
+            .background(Nf.ink.ignoresSafeArea())
         }
     }
 
@@ -140,6 +205,10 @@ struct HomeScreen: View {
                 let heroItems = Array(feed.ongoing.prefix(6))
                 if !heroItems.isEmpty {
                     heroCarousel(heroItems)
+                }
+
+                if !continueItems.isEmpty {
+                    continueSection
                 }
 
                 if !freshWatching.isEmpty {
@@ -168,6 +237,118 @@ struct HomeScreen: View {
             await vm.load(using: app.a365, force: true)
             if account.isSignedIn {
                 lists.refresh()
+            }
+        }
+    }
+
+    private var continueSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Продолжить просмотр")
+                .font(.title3.weight(.bold))
+                .foregroundColor(Nf.text)
+                .padding(.horizontal, 16)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 12) {
+                    ForEach(continueItems) { entry in
+                        if let sid = Int64(entry.animeId) {
+                            NavigationLink(value: AnimeRoute(id: sid, title: entry.title, posterUrl: entry.poster)) {
+                                HStack(spacing: 12) {
+                                    PosterView(urlString: entry.poster, cornerRadius: 10, alignment: .top)
+                                        .frame(width: 54, height: 78)
+
+                                    VStack(alignment: .leading, spacing: 5) {
+                                        Text(entry.title)
+                                            .font(.subheadline.weight(.semibold))
+                                            .foregroundColor(Nf.text)
+                                            .lineLimit(2)
+                                            .multilineTextAlignment(.leading)
+
+                                        Text("Серия \(entry.episode)")
+                                            .font(.caption.weight(.medium))
+                                            .foregroundColor(Nf.violet)
+
+                                        ProgressView(value: entry.progress)
+                                            .tint(entry.finished ? Nf.mint : Nf.violet)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                                .padding(10)
+                                .frame(width: 248)
+                                .background(Nf.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                        .stroke(Color.white.opacity(0.07), lineWidth: 0.7)
+                                )
+                            }
+                            .buttonStyle(NfPressableStyle())
+                            .contextMenu {
+                                Button(role: .destructive) {
+                                    prefs.removeFromHistory(animeId: entry.animeId)
+                                } label: {
+                                    Label("Убрать из истории", systemImage: "trash")
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+            }
+        }
+    }
+
+    private func offlineSection(_ groups: [DownloadedAnime]) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Доступно офлайн")
+                .font(.title3.weight(.bold))
+                .foregroundColor(Nf.text)
+                .padding(.horizontal, 16)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 12) {
+                    ForEach(groups) { group in
+                        Button {
+                            let ready = group.episodes.filter(\.isReady)
+                            guard !ready.isEmpty else { return }
+                            offlinePlayerRequest = PlayerLaunchRequest(
+                                seriesId: group.animeId,
+                                animeTitle: group.title,
+                                posterUrl: group.posterUrl,
+                                episodes: ready.map { $0.toEpisode() },
+                                startIndex: 0,
+                                initialPickKey: nil
+                            )
+                        } label: {
+                            HStack(spacing: 12) {
+                                PosterView(urlString: group.posterUrl, cornerRadius: 10, alignment: .top)
+                                    .frame(width: 52, height: 74)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(group.title)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundColor(Nf.text)
+                                        .lineLimit(2)
+                                        .multilineTextAlignment(.leading)
+                                    Text("\(group.readyCount) \(ListProgress.plural(group.readyCount)) · \(formatBytes(group.totalBytes))")
+                                        .font(.caption)
+                                        .foregroundColor(Nf.mint)
+                                }
+                                Spacer(minLength: 4)
+                                Image(systemName: "play.circle.fill")
+                                    .font(.system(size: 24))
+                                    .foregroundColor(Nf.mint)
+                            }
+                            .padding(10)
+                            .frame(width: 264)
+                            .background(Nf.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                    .stroke(Nf.mint.opacity(0.28), lineWidth: 0.8)
+                            )
+                        }
+                        .buttonStyle(NfPressableStyle())
+                    }
+                }
+                .padding(.horizontal, 16)
             }
         }
     }
@@ -220,7 +401,6 @@ struct HomeScreen: View {
             .frame(height: 416)
             .tabViewStyle(.page(indexDisplayMode: .never))
 
-            // Clean pill page indicator below the hero card
             HStack(spacing: 6) {
                 ForEach(0..<items.count, id: \.self) { i in
                     Capsule()
