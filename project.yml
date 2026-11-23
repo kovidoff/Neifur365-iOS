@@ -1,0 +1,57 @@
+name: Neifur365
+options:
+  bundleIdPrefix: app.neifur365
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "16.0"
+  generateEmptyDirectories: false
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Manual
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+targets:
+  Neifur365:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: Neifur365
+        excludes:
+          - "Tests/**"
+          - "Resources/Info.plist"
+    settings:
+      base:
+        PRODUCT_NAME: Neifur365
+        PRODUCT_BUNDLE_IDENTIFIER: app.neifur365.ios
+        INFOPLIST_FILE: Neifur365/Resources/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/Frameworks"
+        SWIFT_EMIT_LOC_STRINGS: YES
+    scheme:
+      testTargets:
+        - Neifur365Tests
+
+  Neifur365Tests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: Neifur365/Tests
+    dependencies:
+      - target: Neifur365
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.neifur365.ios.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Neifur365.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Neifur365"
+        BUNDLE_LOADER: "$(TEST_HOST)"

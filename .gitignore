@@ -1,0 +1,22 @@
+# Xcode
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+DerivedData/
+build/
+.build/
+.swiftpm/
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# macOS / Windows
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Secrets / Signing
+*.p12
+*.mobileprovision
+*.cer
+local.properties
