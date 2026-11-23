@@ -27,6 +27,7 @@ struct PlayerScreen: View {
 
     private var isOpening: Bool { vm.loadingStream || !vm.engine.isReady }
     private var isWaiting: Bool { isOpening || vm.engine.isBuffering }
+    private var playbackError: String? { vm.errorMessage ?? vm.engine.playbackError }
 
     private enum GestureOverlay: Equatable {
         case brightness(Float)
@@ -45,6 +46,7 @@ struct PlayerScreen: View {
                 MpvVideoView(engine: vm.engine)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .ignoresSafeArea()
+                    .allowsHitTesting(false)
                     .accessibilityHidden(true)
 
                 // Hidden MPVolumeView to control hardware volume smoothly via right-side swipe
@@ -53,43 +55,27 @@ struct PlayerScreen: View {
                     .opacity(0.001)
                     .allowsHitTesting(false)
 
-                gestureLayer(size: geo.size)
-
-                if isBoosting {
-                    boostPill
-                }
-
-                if let flash = seekFlashText {
-                    seekFlashPill(flash)
-                }
-
-                if let overlay = gestureOverlay {
-                    sideGestureHUD(overlay)
-                }
-
-                if let notice = vm.markedWatchedNotice {
-                    VStack {
-                        Spacer()
-                        Text(notice)
-                            .font(.caption.weight(.semibold))
-                            .foregroundColor(Nf.ink)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
-                            .background(Nf.mint, in: Capsule())
-                            .padding(.bottom, showControls ? 116 : 28)
+                ZStack {
+                    if let playbackError {
+                        errorOverlay(playbackError)
+                    } else {
+                        if isWaiting { loadingIndicator }
+                        if isLocked {
+                            if showControls { lockedOverlay }
+                        } else if showControls || isOpening {
+                            controlsOverlay(landscape: geo.size.width > geo.size.height)
+                        }
                     }
-                    .transition(.opacity)
                 }
-
-                if let err = vm.errorMessage ?? vm.engine.playbackError {
-                    errorOverlay(err)
-                } else if isLocked {
-                    if isWaiting { loadingIndicator }
-                    if showControls { lockedOverlay }
-                } else {
-                    if isWaiting { loadingIndicator }
-                    if showControls || isOpening {
-                        controlsOverlay(landscape: geo.size.width > geo.size.height)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background {
+                    if playbackError == nil { gestureLayer(size: geo.size) }
+                }
+                .overlay {
+                    if playbackError == nil {
+                        playbackFeedback
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
                     }
                 }
             }
@@ -205,6 +191,27 @@ struct PlayerScreen: View {
 
     // MARK: - Controls Overlay
 
+    private var playbackFeedback: some View {
+        ZStack {
+            if isBoosting { boostPill }
+            if let flash = seekFlashText { seekFlashPill(flash) }
+            if let overlay = gestureOverlay { sideGestureHUD(overlay) }
+            if let notice = vm.markedWatchedNotice {
+                VStack {
+                    Spacer()
+                    Text(notice)
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(Nf.ink)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(Nf.mint, in: Capsule())
+                        .padding(.bottom, showControls ? 116 : 28)
+                }
+                .transition(.opacity)
+            }
+        }
+    }
+
     private var loadingIndicator: some View {
         VStack(spacing: 10) {
             ProgressView().tint(.white)
@@ -226,11 +233,11 @@ struct PlayerScreen: View {
                 Spacer(minLength: 0)
                 if !isOpening {
                     VStack(spacing: 4) {
-                        timelineBar
                         quickActions
+                        timelineBar
                     }
                     .padding(.horizontal, 16)
-                    .padding(.bottom, 8)
+                    .padding(.bottom, 2)
                     .background(alignment: .bottom) {
                         LinearGradient(colors: [.clear, .black.opacity(0.78)], startPoint: .top, endPoint: .bottom)
                             .ignoresSafeArea(edges: .bottom)
@@ -243,7 +250,6 @@ struct PlayerScreen: View {
                 transportControls
             }
         }
-        .buttonStyle(.plain)
         .transition(.opacity)
     }
 
@@ -328,6 +334,7 @@ struct PlayerScreen: View {
                     .frame(minHeight: 44)
                     .modifier(PlayerControlBackground(shape: Capsule()))
             }
+            .buttonStyle(.plain)
             .accessibilityLabel("Пропустить 85 секунд")
 
             Spacer(minLength: 0)
@@ -361,6 +368,15 @@ struct PlayerScreen: View {
         let position = min(max(isScrubbing ? scrubPosition : vm.engine.position, 0), duration)
 
         return VStack(spacing: 2) {
+            HStack {
+                Text(verbatim: formatClock(position))
+                Spacer()
+                Text(verbatim: vm.engine.duration > 0 ? formatClock(vm.engine.duration) : "--:--")
+            }
+            .foregroundStyle(.white.opacity(0.85))
+            .font(.caption.monospacedDigit())
+            .accessibilityHidden(true)
+
             Slider(
                 value: Binding(
                     get: { position },
@@ -389,15 +405,6 @@ struct PlayerScreen: View {
             .disabled(vm.engine.duration <= 0)
             .accessibilityLabel("Позиция воспроизведения")
             .accessibilityValue(Text(verbatim: formatClock(position)))
-
-            HStack {
-                Text(verbatim: formatClock(position))
-                Spacer()
-                Text(verbatim: vm.engine.duration > 0 ? formatClock(vm.engine.duration) : "--:--")
-            }
-            .foregroundStyle(.white.opacity(0.85))
-            .font(.caption.monospacedDigit())
-            .accessibilityHidden(true)
         }
     }
 
@@ -413,9 +420,10 @@ struct PlayerScreen: View {
                         .font(.caption.weight(.semibold))
                         .foregroundColor(.white)
                         .padding(.horizontal, 14)
-                        .padding(.vertical, 9)
-                        .background(.ultraThinMaterial, in: Capsule())
+                        .frame(minHeight: 44)
+                        .modifier(PlayerControlBackground(shape: Capsule()))
                 }
+                .buttonStyle(.plain)
                 .padding(18)
             }
             Spacer()
@@ -513,6 +521,7 @@ struct PlayerScreen: View {
                 .frame(width: size, height: size)
                 .modifier(PlayerControlBackground(shape: Circle()))
         }
+        .buttonStyle(.plain)
         .accessibilityLabel(Text(label))
     }
 
@@ -563,11 +572,19 @@ private struct PlayerControlBackground<ControlShape: Shape>: ViewModifier {
     let shape: ControlShape
 
     func body(content: Content) -> some View {
-        if #available(iOS 26.0, *) {
-            content.glassEffect(.regular.interactive(), in: shape)
-        } else {
-            content.background(.regularMaterial, in: shape)
-        }
+        content
+            .background {
+                Group {
+                    if #available(iOS 26.0, *) {
+                        shape.fill(.clear).glassEffect(.regular, in: shape)
+                    } else {
+                        shape.fill(.regularMaterial)
+                    }
+                }
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+            }
+            .contentShape(shape)
     }
 }
 
