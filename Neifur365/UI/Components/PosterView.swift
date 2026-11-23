@@ -6,6 +6,7 @@ struct PosterView: View {
     let urlString: String?
     var cornerRadius: CGFloat = 14
     var alignment: Alignment = .top
+    var contentMode: ContentMode = .fill
 
     var body: some View {
         Color.clear
@@ -16,7 +17,7 @@ struct PosterView: View {
                         if let image = state.image {
                             image
                                 .resizable()
-                                .scaledToFill()
+                                .aspectRatio(contentMode: contentMode)
                         } else if state.error != nil {
                             Image(systemName: "film")
                                 .font(.system(size: 22))
@@ -88,11 +89,11 @@ struct AnimePosterCard: View {
     var badgeColor: Color = Nf.mint
     var width: CGFloat = 134
 
-    private var posterHeight: CGFloat { round(width * 1.48) }
+    private var posterHeight: CGFloat { width * 1.5 }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            PosterView(urlString: series.bestPosterUrl, cornerRadius: 14, alignment: .top)
+            PosterView(urlString: series.bestPosterUrl, cornerRadius: 14, alignment: .center, contentMode: .fit)
                 .frame(width: width, height: posterHeight)
                 .overlay(
                     RoundedRectangle(cornerRadius: 14, style: .continuous)

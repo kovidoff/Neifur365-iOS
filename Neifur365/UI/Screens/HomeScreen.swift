@@ -14,8 +14,9 @@ final class HomeViewModel: ObservableObject {
     @Published var errorMessage: String?
 
     func load(using api: Anime365Client, force: Bool = false) async {
-        if !force && feed != nil { return }
+        guard !loading, force || feed == nil else { return }
         loading = true
+        defer { loading = false }
         errorMessage = nil
         do {
             let year = Calendar.current.component(.year, from: Date())
@@ -25,6 +26,7 @@ final class HomeViewModel: ObservableObject {
             async let movies = api.catalog(limit: 24, type: "movie")
 
             let (o, p, y, m) = try await (ongoing, popular, thisYear, movies)
+            guard !Task.isCancelled else { return }
             feed = HomeFeed(
                 ongoing: o,
                 popular: p,
@@ -32,9 +34,9 @@ final class HomeViewModel: ObservableObject {
                 movies: m
             )
         } catch {
+            guard !Task.isCancelled else { return }
             errorMessage = error.userMessage
         }
-        loading = false
     }
 }
 
@@ -51,6 +53,7 @@ struct HomeScreen: View {
     @State private var showSignIn = false
     @State private var editingSeries: Series?
     @State private var offlinePlayerRequest: PlayerLaunchRequest?
+    @ScaledMetric(relativeTo: .title3) private var heroHeight = 204.0
 
     private var freshWatching: [ListedTitle] {
         lists.watching(history: prefs.history).filter { $0.behind > 0 && $0.series != nil }
@@ -198,6 +201,12 @@ struct HomeScreen: View {
     private func feedScroll(_ feed: HomeFeed) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 26) {
+                if let error = vm.errorMessage {
+                    Label(error, systemImage: "wifi.slash")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 16)
+                }
                 if !account.isSignedIn && account.state != .unknown {
                     signInBanner
                 }
@@ -398,8 +407,11 @@ struct HomeScreen: View {
                     .tag(idx)
                 }
             }
-            .frame(height: 416)
+            .frame(height: heroHeight)
             .tabViewStyle(.page(indexDisplayMode: .never))
+            .onChange(of: items.map(\.id)) { ids in
+                if !ids.indices.contains(heroIndex) { heroIndex = 0 }
+            }
 
             HStack(spacing: 6) {
                 ForEach(0..<items.count, id: \.self) { i in
@@ -410,6 +422,7 @@ struct HomeScreen: View {
                 }
             }
             .frame(maxWidth: .infinity)
+            .accessibilityHidden(true)
         }
     }
 
@@ -525,92 +538,56 @@ private struct HeroCard: View {
     let listStatus: ListStatus?
 
     var body: some View {
-        PosterView(urlString: series.bestPosterUrl, cornerRadius: 24, alignment: .top)
-            .frame(maxWidth: .infinity)
-            .frame(height: 416)
-            .overlay {
-                LinearGradient(
-                    stops: [
-                        .init(color: .clear, location: 0.0),
-                        .init(color: .clear, location: 0.44),
-                        .init(color: Nf.ink.opacity(0.68), location: 0.72),
-                        .init(color: Nf.ink.opacity(0.96), location: 1.0)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-            }
-            .overlay(alignment: .topTrailing) {
-                if let listStatus {
-                    HStack(spacing: 5) {
-                        Image(systemName: listStatus.systemImage)
-                            .foregroundColor(listStatus.tintColor)
-                        Text(listStatus.title)
-                            .foregroundColor(.white)
-                    }
-                    .font(.caption.weight(.semibold))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .padding(14)
-                }
-            }
-            .overlay(alignment: .bottomLeading) {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 8) {
-                        Text("ОНГОИНГ")
-                            .font(.system(size: 10, weight: .heavy))
-                            .tracking(0.8)
-                            .foregroundColor(Nf.ink)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Nf.mint, in: Capsule())
-
-                        if let score = series.score {
-                            HStack(spacing: 3) {
-                                Image(systemName: "star.fill")
-                                    .font(.system(size: 10))
-                                    .foregroundColor(Nf.amber)
-                                Text(String(format: "%.1f", score))
-                                    .font(.caption.weight(.bold))
-                                    .foregroundColor(.white)
-                                    .monospacedDigit()
-                            }
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(.ultraThinMaterial, in: Capsule())
-                        }
-
-                        if series.year > 0 {
-                            Text(String(series.year))
-                                .font(.caption.weight(.semibold))
-                                .foregroundColor(.white.opacity(0.82))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(.ultraThinMaterial, in: Capsule())
-                        }
-                    }
-
-                    Text(series.title)
-                        .font(.title2.weight(.bold))
-                        .foregroundColor(.white)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-
-                    if let genres = series.genres, !genres.isEmpty {
-                        Text(genres.prefix(3).map(\.title).joined(separator: " · "))
-                            .font(.caption.weight(.medium))
-                            .foregroundColor(.white.opacity(0.76))
-                            .lineLimit(1)
-                    }
-                }
-                .padding(18)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .overlay(
-                RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .stroke(Color.white.opacity(0.12), lineWidth: 0.8)
+        HStack(spacing: 14) {
+            PosterView(
+                urlString: series.bestPosterUrl, cornerRadius: 12,
+                alignment: .center, contentMode: .fit
             )
+            .frame(width: 108, height: 162)
+            .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 7) {
+                Text("Сейчас выходит")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Nf.mint)
+
+                Text(series.title)
+                    .font(.headline)
+                    .foregroundStyle(Nf.text)
+                    .lineLimit(3)
+                    .multilineTextAlignment(.leading)
+
+                if !metadata.isEmpty {
+                    Text(metadata)
+                        .font(.footnote)
+                        .foregroundStyle(Nf.textDim)
+                        .lineLimit(2)
+                }
+
+                if let listStatus {
+                    Label(listStatus.title, systemImage: listStatus.systemImage)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(listStatus.tintColor)
+                        .lineLimit(1)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Nf.surface, in: RoundedRectangle(cornerRadius: 22))
+        .overlay(alignment: .center) {
+            RoundedRectangle(cornerRadius: 22).strokeBorder(Nf.line, lineWidth: 1)
+                .allowsHitTesting(false)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var metadata: String {
+        var parts: [String] = []
+        if series.year > 0 { parts.append(String(series.year)) }
+        if let score = series.score, score > 0 { parts.append(String(format: "★ %.1f", score)) }
+        parts += (series.genres ?? []).prefix(2).map(\.title)
+        return parts.joined(separator: " · ")
     }
 }

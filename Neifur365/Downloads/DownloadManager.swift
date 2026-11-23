@@ -247,23 +247,18 @@ final class DownloadManager: NSObject, ObservableObject {
             throw ApiError("Эта версия серии доступна только для просмотра онлайн")
         }
 
-        var subtitle: (name: String, data: Data)?
-        if let subUrl = embed.subtitlesUrl ?? embed.subtitlesVttUrl, !subUrl.isEmpty {
-            if let subContent = try? await api.subtitles(url: subUrl), !subContent.isEmpty {
-                let ext = subUrl.lowercased().contains("vtt") ? "vtt" : "ass"
-                subtitle = ("ep_\(id)_\(transferId.uuidString).\(ext)", Data(subContent.utf8))
-            }
-        }
+        let subtitle = await api.subtitles(for: embed)
         try Task.checkCancellation()
         guard pendingRequests[id] == transferId,
               item(forEpisodeId: id)?.isReady != true,
               item(forEpisodeId: id)?.isActive != true else { return false }
 
         var subFileName: String?
-        if let subtitle, (try? subtitle.data.write(
-            to: downloadsDir.appendingPathComponent(subtitle.name), options: .atomic
-        )) != nil {
-            subFileName = subtitle.name
+        if let subtitle {
+            let name = "ep_\(id)_\(transferId.uuidString).\(subtitle.fileExtension)"
+            if (try? subtitle.data.write(to: downloadsDir.appendingPathComponent(name), options: .atomic)) != nil {
+                subFileName = name
+            }
         }
 
         let record = DownloadedEpisode(

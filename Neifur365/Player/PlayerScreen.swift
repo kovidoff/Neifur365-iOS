@@ -4,7 +4,6 @@ import SwiftUI
 import UIKit
 
 struct PlayerScreen: View {
-    @EnvironmentObject private var app: AppContainer
     @EnvironmentObject private var prefs: Prefs
     @Environment(\.dismiss) private var dismiss
 
@@ -26,6 +25,9 @@ struct PlayerScreen: View {
     @State private var showEpisodesSheet = false
     @State private var showSettingsSheet = false
 
+    private var isOpening: Bool { vm.loadingStream || !vm.engine.isReady }
+    private var isWaiting: Bool { isOpening || vm.engine.isBuffering }
+
     private enum GestureOverlay: Equatable {
         case brightness(Float)
         case volume(Float)
@@ -41,7 +43,9 @@ struct PlayerScreen: View {
                 Color.black.ignoresSafeArea()
 
                 MpvVideoView(engine: vm.engine)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .ignoresSafeArea()
+                    .accessibilityHidden(true)
 
                 // Hidden MPVolumeView to control hardware volume smoothly via right-side swipe
                 VolumeSliderBridge()
@@ -79,20 +83,13 @@ struct PlayerScreen: View {
 
                 if let err = vm.errorMessage ?? vm.engine.playbackError {
                     errorOverlay(err)
+                } else if isLocked {
+                    if isWaiting { loadingIndicator }
+                    if showControls { lockedOverlay }
                 } else {
-                    if vm.loadingStream || vm.engine.isBuffering {
-                        ProgressView()
-                            .tint(.white)
-                            .scaleEffect(1.3)
-                            .padding(18)
-                            .background(.ultraThinMaterial, in: Circle())
-                    }
-                    if showControls {
-                        if isLocked {
-                            lockedOverlay
-                        } else {
-                            controlsOverlay
-                        }
+                    if isWaiting { loadingIndicator }
+                    if showControls || isOpening {
+                        controlsOverlay(landscape: geo.size.width > geo.size.height)
                     }
                 }
             }
@@ -101,24 +98,36 @@ struct PlayerScreen: View {
         .persistentSystemOverlays(.hidden)
         .onAppear {
             UIApplication.shared.isIdleTimerDisabled = true
-            requestOrientation(.landscape)
             vm.start()
-            scheduleControlsHide()
         }
         .onDisappear {
             UIApplication.shared.isIdleTimerDisabled = false
             hideTask?.cancel()
             vm.stop()
-            requestOrientation(.portrait)
         }
-        .sheet(isPresented: $showTranslationsSheet) {
+        .onChange(of: isWaiting) { waiting in
+            if !waiting { scheduleControlsHide() }
+        }
+        .onChange(of: vm.engine.isPaused) { paused in
+            if paused {
+                hideTask?.cancel()
+                showControls = true
+            } else {
+                scheduleControlsHide()
+            }
+        }
+        .sheet(isPresented: $showTranslationsSheet, onDismiss: scheduleControlsHide) {
             PlayerTranslationsSheet(vm: vm)
         }
-        .sheet(isPresented: $showEpisodesSheet) {
+        .sheet(isPresented: $showEpisodesSheet, onDismiss: scheduleControlsHide) {
             PlayerEpisodesSheet(vm: vm)
         }
-        .sheet(isPresented: $showSettingsSheet) {
-            PlayerSettingsSheet(vm: vm)
+        .sheet(isPresented: $showSettingsSheet, onDismiss: scheduleControlsHide) {
+            PlayerSettingsSheet(vm: vm) {
+                isLocked = true
+                showControls = true
+                scheduleControlsHide()
+            }
         }
     }
 
@@ -128,7 +137,7 @@ struct PlayerScreen: View {
         Color.clear
             .contentShape(Rectangle())
             .onTapGesture(count: 2, coordinateSpace: .local) { location in
-                guard !isLocked else { return }
+                guard !isLocked, !isOpening else { return }
                 let step = Double(prefs.seekStep)
                 if location.x < size.width * 0.45 {
                     vm.engine.seekRelative(-step)
@@ -149,7 +158,7 @@ struct PlayerScreen: View {
             .simultaneousGesture(
                 LongPressGesture(minimumDuration: 0.45)
                     .onEnded { _ in
-                        guard !isLocked && prefs.holdBoost else { return }
+                        guard !isLocked && !isOpening && prefs.holdBoost else { return }
                         isBoosting = true
                         vm.engine.setSpeed(2.0)
                     }
@@ -196,284 +205,200 @@ struct PlayerScreen: View {
 
     // MARK: - Controls Overlay
 
-    private var controlsOverlay: some View {
-        VStack(spacing: 0) {
-            // Top bar
-            HStack(spacing: 12) {
-                Button {
-                    dismiss()
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 16, weight: .bold))
-                        .foregroundColor(.white)
-                        .frame(width: 38, height: 38)
-                        .background(.ultraThinMaterial, in: Circle())
-                }
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(vm.request.animeTitle)
-                        .font(.subheadline.weight(.bold))
-                        .foregroundColor(.white)
-                        .lineLimit(1)
-
-                    HStack(spacing: 6) {
-                        if let ep = vm.currentEpisode {
-                            Text(ep.label)
-                                .font(.caption.weight(.semibold))
-                                .foregroundColor(.white.opacity(0.85))
-                        }
-                        if let tr = vm.currentTranslation {
-                            Text("· \(tr.author)")
-                                .font(.caption)
-                                .foregroundColor(.white.opacity(0.7))
-                                .lineLimit(1)
-                        } else if vm.isOfflinePlayback {
-                            Text("· Офлайн")
-                                .font(.caption.weight(.semibold))
-                                .foregroundColor(Nf.mint)
-                        }
-                    }
-                }
-
-                Spacer(minLength: 8)
-
-                HStack(spacing: 8) {
-                    if vm.sleepTimer != .off {
-                        playerIconButton("moon.fill", tint: Nf.amber) {
-                            showSettingsSheet = true
-                        }
-                    }
-
-                    playerIconButton(vm.aspectFill ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right") {
-                        vm.toggleAspectFill()
-                        scheduleControlsHide()
-                    }
-
-                    playerIconButton("lock.open") {
-                        withAnimation { isLocked = true }
-                        scheduleControlsHide()
-                    }
-
-                    playerIconButton("gearshape") {
-                        showSettingsSheet = true
-                    }
-                }
-            }
-            .padding(.horizontal, 18)
-            .padding(.top, 14)
-            .padding(.bottom, 22)
-            .background(
-                LinearGradient(colors: [.black.opacity(0.72), .clear], startPoint: .top, endPoint: .bottom)
-                    .ignoresSafeArea(edges: .top)
-            )
-
-            Spacer()
-
-            // Center playback buttons
-            HStack(spacing: 42) {
-                Button {
-                    vm.engine.seekRelative(-Double(prefs.seekStep))
-                    flashSeek("−\(prefs.seekStep) с")
-                    scheduleControlsHide()
-                } label: {
-                    Image(systemName: "gobackward.\(prefs.seekStep)")
-                        .font(.system(size: 30, weight: .semibold))
-                        .foregroundColor(.white)
-                        .frame(width: 56, height: 56)
-                }
-
-                Button {
-                    vm.engine.togglePause()
-                    scheduleControlsHide()
-                } label: {
-                    Image(systemName: vm.engine.isPaused ? "play.fill" : "pause.fill")
-                        .font(.system(size: 34, weight: .bold))
-                        .foregroundColor(.white)
-                        .frame(width: 68, height: 68)
-                        .background(.ultraThinMaterial, in: Circle())
-                }
-
-                Button {
-                    vm.engine.seekRelative(Double(prefs.seekStep))
-                    flashSeek("+\(prefs.seekStep) с")
-                    scheduleControlsHide()
-                } label: {
-                    Image(systemName: "goforward.\(prefs.seekStep)")
-                        .font(.system(size: 30, weight: .semibold))
-                        .foregroundColor(.white)
-                        .frame(width: 56, height: 56)
-                }
-            }
-
-            Spacer()
-
-            // Bottom timeline + quick action pills
-            VStack(spacing: 12) {
-                timelineBar
-
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        Button {
-                            vm.skipOpening()
-                            flashSeek("+85 с")
-                            scheduleControlsHide()
-                        } label: {
-                            Label("+85 с", systemImage: "forward.end.fill")
-                                .font(.caption.weight(.bold))
-                                .foregroundColor(Nf.ink)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 8)
-                                .background(Nf.mint, in: Capsule())
-                        }
-
-                        if !vm.isOfflinePlayback {
-                            playerChip(
-                                title: vm.currentTranslation?.author ?? "Озвучка",
-                                icon: "waveform"
-                            ) {
-                                showTranslationsSheet = true
-                            }
-                        }
-
-                        if !vm.availableQualities.isEmpty {
-                            Menu {
-                                ForEach(vm.availableQualities, id: \.height) { stream in
-                                    Button {
-                                        vm.selectQuality(stream)
-                                    } label: {
-                                        if stream.height == vm.selectedHeight {
-                                            Label("\(stream.height)p", systemImage: "checkmark")
-                                        } else {
-                                            Text("\(stream.height)p")
-                                        }
-                                    }
-                                }
-                            } label: {
-                                playerChipLabel(title: "\(vm.selectedHeight)p", icon: "sparkles.tv")
-                            }
-                        }
-
-                        if vm.hasSubtitles {
-                            playerChip(
-                                title: vm.subtitlesVisible ? "Субтитры" : "Без субт.",
-                                icon: vm.subtitlesVisible ? "captions.bubble.fill" : "captions.bubble",
-                                active: vm.subtitlesVisible
-                            ) {
-                                vm.toggleSubtitles()
-                                scheduleControlsHide()
-                            }
-                        }
-
-                        Menu {
-                            ForEach([0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0], id: \.self) { rate in
-                                Button {
-                                    vm.setSpeed(rate)
-                                } label: {
-                                    let label = rate == 1.0 ? "1× (обычная)" : String(format: "%.2g×", rate)
-                                    if abs(vm.speed - rate) < 0.01 {
-                                        Label(label, systemImage: "checkmark")
-                                    } else {
-                                        Text(label)
-                                    }
-                                }
-                            }
-                        } label: {
-                            playerChipLabel(
-                                title: String(format: "%.2g×", vm.speed),
-                                icon: "speedometer",
-                                active: abs(vm.speed - 1.0) > 0.01
-                            )
-                        }
-
-                        if vm.request.episodes.count > 1 {
-                            playerChip(title: "Серии", icon: "list.bullet") {
-                                showEpisodesSheet = true
-                            }
-                        }
-
-                        if vm.hasNext {
-                            playerChip(title: "Следующая", icon: "forward.fill") {
-                                vm.playNext()
-                                scheduleControlsHide()
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 18)
-                }
-            }
-            .padding(.top, 20)
-            .padding(.bottom, 16)
-            .background(
-                LinearGradient(colors: [.clear, .black.opacity(0.8)], startPoint: .top, endPoint: .bottom)
-                    .ignoresSafeArea(edges: .bottom)
-            )
+    private var loadingIndicator: some View {
+        VStack(spacing: 10) {
+            ProgressView().tint(.white)
+            Text(isOpening ? "Открываем серию…" : "Буферизация…")
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(.white)
         }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .accessibilityElement(children: .combine)
+        .allowsHitTesting(false)
+    }
+
+    private func controlsOverlay(landscape: Bool) -> some View {
+        ZStack {
+            VStack(spacing: 0) {
+                header(landscape: landscape)
+                Spacer(minLength: 0)
+                if !isOpening {
+                    VStack(spacing: 4) {
+                        timelineBar
+                        quickActions
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
+                    .background(alignment: .bottom) {
+                        LinearGradient(colors: [.clear, .black.opacity(0.78)], startPoint: .top, endPoint: .bottom)
+                            .ignoresSafeArea(edges: .bottom)
+                            .allowsHitTesting(false)
+                    }
+                }
+            }
+
+            if !isWaiting {
+                transportControls
+            }
+        }
+        .buttonStyle(.plain)
         .transition(.opacity)
     }
 
-    private var timelineBar: some View {
-        let total = max(vm.engine.duration, 1)
-        let displayedPos = isScrubbing ? scrubPosition : vm.engine.position
+    private func header(landscape: Bool) -> some View {
+        HStack(spacing: 10) {
+            playerIconButton("xmark", label: "Закрыть") { dismiss() }
 
-        return VStack(spacing: 6) {
-            HStack {
-                Text(formatClock(displayedPos))
-                    .font(.caption.weight(.semibold))
-                    .foregroundColor(.white)
-                    .monospacedDigit()
-                Spacer()
-                Text(vm.engine.duration > 0 ? formatClock(vm.engine.duration) : "--:--")
-                    .font(.caption.weight(.medium))
-                    .foregroundColor(.white.opacity(0.72))
-                    .monospacedDigit()
+            VStack(alignment: .leading, spacing: 2) {
+                Text(vm.request.animeTitle)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(landscape ? 1 : 2)
+                Text(episodeDetails)
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.75))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(.white)
+            .accessibilityElement(children: .combine)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            playerIconButton(
+                landscape ? "rectangle.portrait" : "rectangle",
+                label: landscape ? "Вертикальный экран" : "Горизонтальный экран"
+            ) {
+                requestOrientation(landscape ? .portrait : .landscape)
             }
 
-            GeometryReader { barGeo in
-                let width = max(barGeo.size.width, 1)
-                let progressFrac = min(max(displayedPos / total, 0), 1)
-                let cacheFrac = min(max(vm.engine.cacheTime / total, 0), 1)
-
-                ZStack(alignment: .leading) {
-                    Capsule()
-                        .fill(Color.white.opacity(0.24))
-                        .frame(height: isScrubbing ? 7 : 4.5)
-
-                    Capsule()
-                        .fill(Color.white.opacity(0.42))
-                        .frame(width: width * cacheFrac, height: isScrubbing ? 7 : 4.5)
-
-                    Capsule()
-                        .fill(Nf.violet)
-                        .frame(width: width * progressFrac, height: isScrubbing ? 7 : 4.5)
-
-                    Circle()
-                        .fill(.white)
-                        .frame(width: isScrubbing ? 18 : 13, height: isScrubbing ? 18 : 13)
-                        .shadow(color: .black.opacity(0.4), radius: 3)
-                        .offset(x: max(0, min(width - 14, width * progressFrac - 7)))
+            if !isOpening {
+                playerIconButton("ellipsis", label: "Настройки плеера") {
+                    showSettingsSheet = true
                 }
-                .frame(height: 28)
-                .contentShape(Rectangle())
-                .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { val in
-                            isScrubbing = true
-                            let frac = min(max(val.location.x / width, 0), 1)
-                            scrubPosition = Double(frac) * total
-                            hideTask?.cancel()
-                        }
-                        .onEnded { val in
-                            let frac = min(max(val.location.x / width, 0), 1)
-                            let target = Double(frac) * total
-                            vm.engine.seek(to: target)
-                            isScrubbing = false
-                            scheduleControlsHide()
-                        }
-                )
             }
-            .frame(height: 28)
         }
-        .padding(.horizontal, 18)
+        .padding(.horizontal, 16)
+        .padding(.top, 6)
+        .padding(.bottom, 18)
+        .background(alignment: .top) {
+            LinearGradient(colors: [.black.opacity(0.75), .clear], startPoint: .top, endPoint: .bottom)
+                .ignoresSafeArea(edges: .top)
+                .allowsHitTesting(false)
+        }
+    }
+
+    private var episodeDetails: String {
+        let quality = isOpening || vm.selectedHeight <= 0 ? nil : "\(vm.selectedHeight)p"
+        let source = vm.isOfflinePlayback ? "Офлайн" : vm.currentTranslation?.author
+        return [vm.currentEpisode?.label, source, quality].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    private var transportControls: some View {
+        HStack(spacing: 24) {
+            playerIconButton("gobackward.\(prefs.seekStep)", label: "Назад на \(prefs.seekStep) секунд", size: 48) {
+                vm.engine.seekRelative(-Double(prefs.seekStep))
+                flashSeek("−\(prefs.seekStep) с")
+                scheduleControlsHide()
+            }
+            playerIconButton(
+                vm.engine.isPaused ? "play.fill" : "pause.fill",
+                label: vm.engine.isPaused ? "Воспроизвести" : "Пауза",
+                size: 62
+            ) {
+                vm.engine.togglePause()
+            }
+            playerIconButton("goforward.\(prefs.seekStep)", label: "Вперёд на \(prefs.seekStep) секунд", size: 48) {
+                vm.engine.seekRelative(Double(prefs.seekStep))
+                flashSeek("+\(prefs.seekStep) с")
+                scheduleControlsHide()
+            }
+        }
+    }
+
+    private var quickActions: some View {
+        HStack(spacing: 8) {
+            Button {
+                vm.skipOpening()
+                flashSeek("+85 с")
+                scheduleControlsHide()
+            } label: {
+                Text("+85 с")
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 10)
+                    .frame(minHeight: 44)
+                    .modifier(PlayerControlBackground(shape: Capsule()))
+            }
+            .accessibilityLabel("Пропустить 85 секунд")
+
+            Spacer(minLength: 0)
+
+            if !vm.translations.isEmpty {
+                playerIconButton("waveform", label: "Озвучки и субтитры") {
+                    showTranslationsSheet = true
+                }
+            }
+            if vm.hasSubtitles {
+                playerIconButton(
+                    vm.subtitlesVisible ? "captions.bubble.fill" : "captions.bubble",
+                    label: vm.subtitlesVisible ? "Скрыть субтитры" : "Показать субтитры"
+                ) {
+                    vm.toggleSubtitles()
+                    scheduleControlsHide()
+                }
+            }
+            if vm.request.episodes.count > 1 {
+                playerIconButton("list.bullet", label: "Список серий") { showEpisodesSheet = true }
+            }
+            if vm.hasNext {
+                playerIconButton("forward.end.fill", label: "Следующая серия") { vm.playNext() }
+            }
+        }
+        .foregroundStyle(.white)
+    }
+
+    private var timelineBar: some View {
+        let duration = max(vm.engine.duration, 1)
+        let position = min(max(isScrubbing ? scrubPosition : vm.engine.position, 0), duration)
+
+        return VStack(spacing: 2) {
+            Slider(
+                value: Binding(
+                    get: { position },
+                    set: { value in
+                        if isScrubbing {
+                            scrubPosition = value
+                        } else {
+                            vm.engine.seek(to: value)
+                        }
+                    }
+                ),
+                in: 0...duration,
+                onEditingChanged: { editing in
+                    if editing {
+                        scrubPosition = position
+                        isScrubbing = true
+                        hideTask?.cancel()
+                    } else if isScrubbing {
+                        vm.engine.seek(to: scrubPosition)
+                        isScrubbing = false
+                        scheduleControlsHide()
+                    }
+                }
+            )
+            .tint(.white)
+            .disabled(vm.engine.duration <= 0)
+            .accessibilityLabel("Позиция воспроизведения")
+            .accessibilityValue(Text(verbatim: formatClock(position)))
+
+            HStack {
+                Text(verbatim: formatClock(position))
+                Spacer()
+                Text(verbatim: vm.engine.duration > 0 ? formatClock(vm.engine.duration) : "--:--")
+            }
+            .foregroundStyle(.white.opacity(0.85))
+            .font(.caption.monospacedDigit())
+            .accessibilityHidden(true)
+        }
     }
 
     private var lockedOverlay: some View {
@@ -575,40 +500,20 @@ struct PlayerScreen: View {
         .background(.ultraThinMaterial, in: Capsule())
     }
 
-    private func playerIconButton(_ icon: String, tint: Color = .white, action: @escaping () -> Void) -> some View {
+    private func playerIconButton(
+        _ icon: String,
+        label: String,
+        size: CGFloat = 44,
+        action: @escaping () -> Void
+    ) -> some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundColor(tint)
-                .frame(width: 38, height: 38)
-                .background(.ultraThinMaterial, in: Circle())
+                .font(.system(size: size >= 60 ? 26 : size >= 48 ? 22 : 16, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: size, height: size)
+                .modifier(PlayerControlBackground(shape: Circle()))
         }
-    }
-
-    private func playerChip(title: String, icon: String, active: Bool = false, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            playerChipLabel(title: title, icon: icon, active: active)
-        }
-    }
-
-    private func playerChipLabel(title: String, icon: String, active: Bool = false) -> some View {
-        HStack(spacing: 5) {
-            Image(systemName: icon)
-                .font(.system(size: 12, weight: .semibold))
-            Text(title)
-                .font(.caption.weight(.semibold))
-                .lineLimit(1)
-        }
-        .foregroundColor(active ? Nf.ink : .white)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background {
-            if active {
-                Capsule().fill(Nf.violet)
-            } else {
-                Capsule().fill(.ultraThinMaterial)
-            }
-        }
+        .accessibilityLabel(Text(label))
     }
 
     private func flashSeek(_ text: String) {
@@ -626,7 +531,8 @@ struct PlayerScreen: View {
         hideTask = Task {
             try? await Task.sleep(nanoseconds: 4_000_000_000)
             guard !Task.isCancelled else { return }
-            if !vm.engine.isPaused && !isScrubbing {
+            if !vm.engine.isPaused && !isScrubbing && !isWaiting &&
+                !showSettingsSheet && !showEpisodesSheet && !showTranslationsSheet {
                 withAnimation(.easeInOut(duration: 0.25)) {
                     showControls = false
                 }
@@ -635,7 +541,7 @@ struct PlayerScreen: View {
     }
 
     private func formatClock(_ sec: Double) -> String {
-        let s = max(0, Int(sec))
+        let s = sec.isFinite ? max(0, Int(sec)) : 0
         let h = s / 3600
         let m = (s % 3600) / 60
         let r = s % 60
@@ -646,8 +552,22 @@ struct PlayerScreen: View {
     }
 
     private func requestOrientation(_ mask: UIInterfaceOrientationMask) {
-        guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
+        guard let scene = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .first(where: { $0.activationState == .foregroundActive }) else { return }
         scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { _ in }
+    }
+}
+
+private struct PlayerControlBackground<ControlShape: Shape>: ViewModifier {
+    let shape: ControlShape
+
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content.glassEffect(.regular.interactive(), in: shape)
+        } else {
+            content.background(.regularMaterial, in: shape)
+        }
     }
 }
 
@@ -794,31 +714,27 @@ private struct PlayerSettingsSheet: View {
     @EnvironmentObject private var prefs: Prefs
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var vm: PlayerViewModel
+    let onLock: () -> Void
 
     var body: some View {
         NavigationStack {
             Form {
-                if !vm.availableQualities.isEmpty {
-                    Section("Качество видео") {
-                        ForEach(vm.availableQualities, id: \.height) { stream in
-                            Button {
-                                vm.selectQuality(stream)
-                            } label: {
-                                HStack {
-                                    Text("\(stream.height)p")
-                                        .foregroundColor(Nf.text)
-                                    Spacer()
-                                    if stream.height == vm.selectedHeight {
-                                        Image(systemName: "checkmark")
-                                            .foregroundColor(Nf.violet)
-                                    }
+                Section("Воспроизведение") {
+                    if vm.availableQualities.count > 1 {
+                        Picker("Качество", selection: Binding(
+                            get: { vm.selectedHeight },
+                            set: { height in
+                                if let stream = vm.availableQualities.first(where: { $0.height == height }) {
+                                    vm.selectQuality(stream)
                                 }
+                            }
+                        )) {
+                            ForEach(vm.availableQualities, id: \.height) { stream in
+                                Text(verbatim: stream.height > 0 ? "\(stream.height)p" : "Авто")
+                                    .tag(stream.height)
                             }
                         }
                     }
-                }
-
-                Section("Воспроизведение") {
                     Picker("Скорость", selection: Binding(
                         get: { vm.speed },
                         set: { vm.setSpeed($0) }
@@ -840,6 +756,13 @@ private struct PlayerSettingsSheet: View {
                         ForEach(SleepTimerOption.allCases) { opt in
                             Text(opt.title).tag(opt)
                         }
+                    }
+
+                    Button {
+                        onLock()
+                        dismiss()
+                    } label: {
+                        Label("Заблокировать управление", systemImage: "lock")
                     }
                 }
 

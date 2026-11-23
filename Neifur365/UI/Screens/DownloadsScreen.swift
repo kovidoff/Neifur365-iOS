@@ -145,10 +145,10 @@ private struct DownloadedEpisodeRow: View {
                         Image(systemName: "play.fill")
                             .font(.system(size: 12, weight: .bold))
                             .foregroundColor(Nf.mint)
-                    } else if item.status == .downloading || item.status == .queued {
-                        ProgressView(value: item.progress)
-                            .progressViewStyle(.circular)
-                            .scaleEffect(0.7)
+                    } else if item.isActive {
+                        Image(systemName: "arrow.down")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(Nf.violet)
                     } else {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .font(.system(size: 13))
@@ -176,10 +176,10 @@ private struct DownloadedEpisodeRow: View {
                         Text(item.errorMessage ?? "Ошибка загрузки")
                             .font(.caption)
                             .foregroundColor(Nf.red)
-                            .lineLimit(1)
+                            .lineLimit(3)
                     } else {
                         let subMark = item.subtitleFileName != nil ? " · субтитры" : ""
-                        Text("\(item.studioName) · \(item.qualityHeight)p\(subMark) · \(formatBytes(item.totalBytes))")
+                        Text(verbatim: "\(item.studioName) · \(item.qualityHeight)p\(subMark) · \(formatBytes(item.totalBytes))")
                             .font(.caption)
                             .foregroundColor(Nf.textDim)
                             .lineLimit(1)

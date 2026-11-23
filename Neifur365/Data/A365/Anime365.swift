@@ -496,7 +496,20 @@ final class Anime365Client {
         try await api("/translations/embed/\(translationId)", as: Embed.self)
     }
 
-    func subtitles(url: String) async throws -> String {
+    func subtitles(for embed: Embed) async -> EpisodeSubtitles? {
+        var attempted = Set<String>()
+        for raw in [embed.subtitlesUrl, embed.subtitlesVttUrl].compactMap({ $0 }) {
+            let url = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !Task.isCancelled else { return nil }
+            guard !url.isEmpty, attempted.insert(url).inserted else { continue }
+            if let text = try? await fetchSubtitles(url: url), let document = EpisodeSubtitles(text: text) {
+                return document
+            }
+        }
+        return nil
+    }
+
+    private func fetchSubtitles(url: String) async throws -> String {
         try await mirrored { base in
             let resolved = SitePages.resolve(base: base, url: url)
             guard let target = URL(string: resolved) else {

@@ -22,8 +22,8 @@ final class MpvMetalLayer: CAMetalLayer {
             if Thread.isMainThread {
                 super.wantsExtendedDynamicRangeContent = newValue
             } else {
-                DispatchQueue.main.sync {
-                    super.wantsExtendedDynamicRangeContent = newValue
+                DispatchQueue.main.async { [weak self] in
+                    self?.wantsExtendedDynamicRangeContent = newValue
                 }
             }
         }
@@ -31,15 +31,17 @@ final class MpvMetalLayer: CAMetalLayer {
 }
 
 final class MpvContainerUIView: UIView {
-    let metalLayer = MpvMetalLayer()
+    private let engine: MpvEngine
+    private var metalLayer: MpvMetalLayer?
+    private var drawableSize: CGSize = .zero
+    private var resizeTask: Task<Void, Never>?
 
-    override init(frame: CGRect) {
-        super.init(frame: frame)
+    init(engine: MpvEngine) {
+        self.engine = engine
+        super.init(frame: .zero)
         backgroundColor = .black
-        metalLayer.contentsScale = UIScreen.main.nativeScale
-        metalLayer.framebufferOnly = true
-        metalLayer.backgroundColor = UIColor.black.cgColor
-        layer.addSublayer(metalLayer)
+        clipsToBounds = true
+        isUserInteractionEnabled = false
     }
 
     required init?(coder: NSCoder) {
@@ -48,10 +50,49 @@ final class MpvContainerUIView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        guard let window, bounds.width > 1, bounds.height > 1 else { return }
+        let scale = window.screen.nativeScale
+        let size = CGSize(width: (bounds.width * scale).rounded(), height: (bounds.height * scale).rounded())
+        guard size != drawableSize else { return }
+        drawableSize = size
+        resizeTask?.cancel()
+
+        if metalLayer == nil {
+            replaceSurface(size: size, scale: scale)
+        } else {
+            // MoltenVK only reconfigures when mpv rebinds the window. Wait for rotation layout to settle.
+            resizeTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 180_000_000)
+                guard !Task.isCancelled, let self, self.window != nil else { return }
+                self.replaceSurface(size: size, scale: scale)
+            }
+        }
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window == nil {
+            resizeTask?.cancel()
+            drawableSize = .zero
+        } else {
+            setNeedsLayout()
+        }
+    }
+
+    private func replaceSurface(size: CGSize, scale: CGFloat) {
+        let surface = MpvMetalLayer()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        metalLayer.frame = bounds
+        surface.frame = bounds
+        surface.contentsScale = scale
+        surface.drawableSize = size
+        surface.framebufferOnly = true
+        surface.backgroundColor = UIColor.black.cgColor
+        metalLayer?.removeFromSuperlayer()
+        layer.addSublayer(surface)
+        metalLayer = surface
         CATransaction.commit()
+        engine.attach(to: surface)
     }
 }
 
@@ -59,9 +100,7 @@ struct MpvVideoView: UIViewRepresentable {
     let engine: MpvEngine
 
     func makeUIView(context: Context) -> MpvContainerUIView {
-        let view = MpvContainerUIView(frame: .zero)
-        engine.attach(to: view.metalLayer)
-        return view
+        MpvContainerUIView(engine: engine)
     }
 
     func updateUIView(_ uiView: MpvContainerUIView, context: Context) {}
@@ -70,9 +109,9 @@ struct MpvVideoView: UIViewRepresentable {
 final class MpvEngine: ObservableObject {
     @Published var position: Double = 0
     @Published var duration: Double = 0
-    @Published var cacheTime: Double = 0
     @Published var isPaused: Bool = false
     @Published var isBuffering: Bool = true
+    @Published private(set) var isReady = false
     @Published var isEnded: Bool = false
     @Published var playbackError: String?
 
@@ -88,6 +127,7 @@ final class MpvEngine: ObservableObject {
     private var queuedLoadID: UUID?
     private var acceptsPlaybackEvents = false
     private var isShutdown = false
+    private var initializationError: String?
     private let userAgent: String
     private var currentTitle = ""
     private var currentSubtitle = ""
@@ -98,6 +138,7 @@ final class MpvEngine: ObservableObject {
         let url: String
         let startSeconds: Double
         let subtitleFile: URL?
+        let paused: Bool
     }
 
     init(userAgent: String) {
@@ -110,33 +151,42 @@ final class MpvEngine: ObservableObject {
     deinit {
         NotificationCenter.default.removeObserver(self)
         clearRemoteCommands()
-        shutdown()
+        releaseMpv()
     }
 
     func attach(to layer: MpvMetalLayer) {
-        guard attachedLayer !== layer else { return }
-        attachedLayer = layer
-
         queue.async { [weak self] in
             guard let self, !self.isShutdown else { return }
-            self.initializeMpv(layer: layer)
+            if let ctx = self.mpv {
+                // Keep the previous layer alive until mpv has switched video outputs.
+                var wid = Self.windowID(for: layer)
+                if mpv_set_property(ctx, "wid", MPV_FORMAT_INT64, &wid) >= 0 {
+                    self.attachedLayer = layer
+                }
+            } else {
+                self.attachedLayer = layer
+                self.initializeMpv(layer: layer)
+            }
             if let pending = self.pendingLoad {
                 self.pendingLoad = nil
-                self.performLoad(pending)
+                self.open(pending)
             }
         }
     }
 
+    private static func windowID(for layer: MpvMetalLayer) -> Int64 {
+        Int64(Int(bitPattern: Unmanaged.passUnretained(layer).toOpaque()))
+    }
+
     private func initializeMpv(layer: MpvMetalLayer) {
-        if mpv != nil { return }
         guard let ctx = mpv_create() else {
-            DispatchQueue.main.async { self.playbackError = "Не удалось инициализировать libmpv" }
+            initializationError = "Не удалось инициализировать плеер"
             return
         }
         mpv = ctx
 
         let fontsDir = prepareSubtitleFontsDirectory()
-        var wid = Int64(Int(bitPattern: Unmanaged.passUnretained(layer).toOpaque()))
+        var wid = Self.windowID(for: layer)
         mpv_set_option(ctx, "wid", MPV_FORMAT_INT64, &wid)
 
         setOption("vo", "gpu-next")
@@ -151,27 +201,33 @@ final class MpvEngine: ObservableObject {
         setOption("demuxer-max-back-bytes", "24MiB")
         setOption("user-agent", userAgent)
         setOption("sub-auto", "no")
-        setOption("sub-ass-override", "no")
+        setOption("sub-ass", "yes")
+        setOption("sub-ass-override", currentSubScale == 1 ? "no" : "scale")
         setOption("sub-ass-force-margins", "no")
+        setOption("sub-scale-signs", "no")
+        setOption("embeddedfonts", "yes")
         setOption("sub-scale", String(format: "%.2f", currentSubScale))
         if let fontsDir {
+            setOption("config-dir", fontsDir.deletingLastPathComponent().path)
             setOption("sub-fonts-dir", fontsDir.path)
-            setOption("sub-font", "DejaVu Sans")
+            setOption("sub-font", "Manrope")
         }
         setOption("ao", "audiounit")
         mpv_request_log_messages(ctx, "warn")
 
         if mpv_initialize(ctx) < 0 {
-            DispatchQueue.main.async { self.playbackError = "Ошибка запуска libmpv" }
+            mpv_terminate_destroy(ctx)
+            mpv = nil
+            initializationError = "Не удалось запустить плеер"
             return
         }
+        initializationError = nil
 
         mpv_observe_property(ctx, 1, "time-pos", MPV_FORMAT_DOUBLE)
         mpv_observe_property(ctx, 2, "duration", MPV_FORMAT_DOUBLE)
         mpv_observe_property(ctx, 3, "pause", MPV_FORMAT_FLAG)
         mpv_observe_property(ctx, 4, "paused-for-cache", MPV_FORMAT_FLAG)
         mpv_observe_property(ctx, 5, "eof-reached", MPV_FORMAT_FLAG)
-        mpv_observe_property(ctx, 6, "demuxer-cache-time", MPV_FORMAT_DOUBLE)
 
         let rawSelf = Unmanaged.passUnretained(self).toOpaque()
         mpv_set_wakeup_callback(ctx, { userdata in
@@ -185,12 +241,12 @@ final class MpvEngine: ObservableObject {
     func prepareForLoad(startSeconds: Double = 0) {
         loadID = UUID()
         isBuffering = true
+        isReady = false
         isEnded = false
         isPaused = false
         playbackError = nil
         position = startSeconds
         duration = 0
-        cacheTime = 0
 
         queue.async { [weak self] in
             guard let self, !self.isShutdown else { return }
@@ -207,6 +263,7 @@ final class MpvEngine: ObservableObject {
         url: String,
         startSeconds: Double = 0,
         subtitleFile: URL? = nil,
+        paused: Bool = false,
         title: String = "",
         subtitle: String = ""
     ) {
@@ -218,16 +275,27 @@ final class MpvEngine: ObservableObject {
             id: loadID,
             url: url,
             startSeconds: max(0, startSeconds),
-            subtitleFile: subtitleFile
+            subtitleFile: subtitleFile,
+            paused: paused
         )
 
         queue.async { [weak self] in
             guard let self, !self.isShutdown else { return }
-            guard self.mpv != nil else {
-                self.pendingLoad = req
-                return
+            self.open(req)
+        }
+    }
+
+    private func open(_ request: PendingLoad) {
+        if let initializationError {
+            queuedLoadID = request.id
+            publishPlayback {
+                $0.isBuffering = false
+                $0.playbackError = initializationError
             }
-            self.performLoad(req)
+        } else if mpv != nil {
+            performLoad(request)
+        } else {
+            pendingLoad = request
         }
     }
 
@@ -242,6 +310,7 @@ final class MpvEngine: ObservableObject {
         }
 
         var args = ["loadfile", req.url, "replace"]
+        setFlag("pause", req.paused)
         if !options.isEmpty {
             args.append(contentsOf: ["-1", options.joined(separator: ",")])
         }
@@ -255,8 +324,10 @@ final class MpvEngine: ObservableObject {
             return
         }
 
-        setFlag("pause", false)
-        publishPlayback { $0.updateNowPlaying() }
+        publishPlayback {
+            $0.isPaused = req.paused
+            $0.updateNowPlaying()
+        }
     }
 
     private var pendingSubtitleFile: URL?
@@ -306,9 +377,11 @@ final class MpvEngine: ObservableObject {
     }
 
     func setSubtitleScale(_ scale: Double) {
-        currentSubScale = scale
         queue.async { [weak self] in
-            self?.setDouble("sub-scale", scale)
+            guard let self else { return }
+            self.currentSubScale = scale
+            self.setProperty("sub-ass-override", scale == 1 ? "no" : "scale")
+            self.setDouble("sub-scale", scale)
         }
     }
 
@@ -319,16 +392,20 @@ final class MpvEngine: ObservableObject {
         }
     }
 
+    @MainActor
     func shutdown() {
-        queue.sync {
-            guard !isShutdown else { return }
-            isShutdown = true
-            if let ctx = mpv {
-                mpv_set_wakeup_callback(ctx, nil, nil)
-                mpv_terminate_destroy(ctx)
-                mpv = nil
-            }
+        loadID = UUID()
+        queue.async { [self] in releaseMpv() }
+    }
+
+    private func releaseMpv() {
+        isShutdown = true
+        if let ctx = mpv {
+            mpv_set_wakeup_callback(ctx, nil, nil)
+            mpv_terminate_destroy(ctx)
+            mpv = nil
         }
+        attachedLayer = nil
     }
 
     // MARK: - Event Loop
@@ -367,9 +444,14 @@ final class MpvEngine: ObservableObject {
                 command(["sub-add", sub.path, "select"])
             }
             publishPlayback {
-                $0.isBuffering = false
                 $0.playbackError = nil
                 $0.updateNowPlaying()
+            }
+
+        case MPV_EVENT_PLAYBACK_RESTART:
+            publishPlayback {
+                $0.isReady = true
+                $0.isBuffering = false
             }
 
         case MPV_EVENT_START_FILE:
@@ -409,11 +491,6 @@ final class MpvEngine: ObservableObject {
                         $0.duration = val
                         $0.updateNowPlaying()
                     }
-                }
-            case "demuxer-cache-time":
-                if prop.format == MPV_FORMAT_DOUBLE, let valPtr = prop.data {
-                    let val = valPtr.assumingMemoryBound(to: Double.self).pointee
-                    publishPlayback { $0.cacheTime = val }
                 }
             case "pause":
                 if prop.format == MPV_FORMAT_FLAG, let valPtr = prop.data {
@@ -487,15 +564,19 @@ final class MpvEngine: ObservableObject {
 
     private func prepareSubtitleFontsDirectory() -> URL? {
         let fm = FileManager.default
-        let dir = fm.temporaryDirectory.appendingPathComponent("neifur_mpv_fonts", isDirectory: true)
-        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        if let src = Bundle.main.url(forResource: "subfont", withExtension: "ttf") {
-            let dest = dir.appendingPathComponent("subfont.ttf")
-            if !fm.fileExists(atPath: dest.path) {
-                try? fm.copyItem(at: src, to: dest)
-            }
+        guard let bundled = Bundle.main.url(forResource: "subfont", withExtension: "ttf") else { return nil }
+        let config = fm.temporaryDirectory.appendingPathComponent("neifur_mpv", isDirectory: true)
+        let fonts = config.appendingPathComponent("fonts", isDirectory: true)
+        do {
+            try fm.createDirectory(at: fonts, withIntermediateDirectories: true)
+            let fallback = config.appendingPathComponent("subfont.ttf")
+            if !fm.fileExists(atPath: fallback.path) { try fm.copyItem(at: bundled, to: fallback) }
+            let namedFont = fonts.appendingPathComponent("Manrope-SemiBold.ttf")
+            if !fm.fileExists(atPath: namedFont.path) { try fm.copyItem(at: bundled, to: namedFont) }
+            return fonts
+        } catch {
+            return nil
         }
-        return dir
     }
 
     // MARK: - Lifecycle & Audio / Now Playing

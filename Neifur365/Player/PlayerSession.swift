@@ -180,6 +180,7 @@ final class PlayerViewModel: ObservableObject {
     func selectTranslation(_ tr: Translation) {
         guard let episode = currentEpisode else { return }
         let resumePos = engine.position
+        let wasPaused = engine.isPaused
         currentPickKey = tr.pickKey
         app.prefs.setPick(animeId: request.seriesId, key: tr.pickKey)
         currentTranslation = tr
@@ -192,7 +193,7 @@ final class PlayerViewModel: ObservableObject {
         engine.prepareForLoad(startSeconds: resumePos)
         loadTask = Task {
             do {
-                try await openTranslation(tr, episode: episode, startSeconds: resumePos)
+                try await openTranslation(tr, episode: episode, startSeconds: resumePos, paused: wasPaused)
             } catch {
                 if Task.isCancelled { return }
                 loadingStream = false
@@ -202,7 +203,8 @@ final class PlayerViewModel: ObservableObject {
     }
 
     func selectQuality(_ stream: EmbedStream) {
-        guard !loadingStream, let episode = currentEpisode, let url = stream.urls.first else { return }
+        guard !loadingStream, stream.height != selectedHeight,
+              let episode = currentEpisode, let url = stream.urls.first else { return }
         let resumePos = engine.position
         selectedHeight = stream.height
         app.prefs.quality = stream.height
@@ -211,6 +213,7 @@ final class PlayerViewModel: ObservableObject {
             url: url,
             startSeconds: resumePos,
             subtitleFile: subFile,
+            paused: engine.isPaused,
             title: request.animeTitle,
             subtitle: "\(episode.label) · \(currentTranslation?.author ?? "")"
         )
@@ -218,12 +221,13 @@ final class PlayerViewModel: ObservableObject {
 
     private var lastSubtitleTempURL: URL?
 
-    private func openTranslation(_ tr: Translation, episode: Episode, startSeconds: Double) async throws {
+    private func openTranslation(_ tr: Translation, episode: Episode, startSeconds: Double, paused: Bool = false) async throws {
         let embed = try await app.a365.embed(translationId: tr.id)
         if Task.isCancelled { return }
 
+        var heights = Set<Int>()
         let sortedStreams = embed.stream
-            .filter { !$0.urls.isEmpty }
+            .filter { !$0.urls.isEmpty && heights.insert($0.height).inserted }
             .sorted { $0.height > $1.height }
 
         let targetQ = app.prefs.quality
@@ -231,18 +235,14 @@ final class PlayerViewModel: ObservableObject {
         guard let chosen = bestStream, let rawUrl = chosen.urls.first else {
             throw ApiError("Не удалось получить ссылку на видео")
         }
-        var subFile: URL? = nil
-        if let subUrl = embed.subtitlesUrl ?? embed.subtitlesVttUrl, !subUrl.isEmpty {
-            if let text = try? await app.a365.subtitles(url: subUrl), !Task.isCancelled, !text.isEmpty {
-                let ext = subUrl.lowercased().contains("vtt") ? "vtt" : "ass"
-                let temp = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("neifur_sub_\(tr.id).\(ext)")
-                if (try? Data(text.utf8).write(to: temp, options: .atomic)) != nil {
-                    subFile = temp
-                }
-            }
-        }
+        let subtitle = await app.a365.subtitles(for: embed)
         guard !Task.isCancelled else { return }
+        var subFile: URL?
+        if let subtitle {
+            let temp = FileManager.default.temporaryDirectory
+                .appendingPathComponent("neifur_sub_\(tr.id).\(subtitle.fileExtension)")
+            if (try? subtitle.data.write(to: temp, options: .atomic)) != nil { subFile = temp }
+        }
         availableQualities = sortedStreams
         selectedHeight = chosen.height
         lastSubtitleTempURL = subFile
@@ -253,6 +253,7 @@ final class PlayerViewModel: ObservableObject {
             url: rawUrl,
             startSeconds: startSeconds,
             subtitleFile: subFile,
+            paused: paused,
             title: request.animeTitle,
             subtitle: "\(episode.label) · \(tr.author)"
         )

@@ -2,6 +2,26 @@ import XCTest
 @testable import Neifur365
 
 final class SitePagesTests: XCTestCase {
+    func testSubtitlesPreserveASSStylesAndPositioning() throws {
+        let script = """
+        \u{FEFF}[Script Info]
+        PlayResX: 1920
+        PlayResY: 1080
+        [V4+ Styles]
+        Style: Sign,Manrope,54,&H0000FFFF
+        [Events]
+        Dialogue: 0,0:00:00.00,0:00:04.00,Sign,,0,0,0,,{\\pos(1420,160)}Надпись
+        """
+        let subtitles = try XCTUnwrap(EpisodeSubtitles(text: script))
+        XCTAssertEqual(subtitles.fileExtension, "ass")
+        XCTAssertEqual(subtitles.data, Data(script.utf8))
+    }
+
+    func testSubtitlesRecognizeWebVTTAndRejectHTML() {
+        XCTAssertEqual(EpisodeSubtitles(text: "WEBVTT\n\n00:00.000 --> 00:01.000\nТекст")?.fileExtension, "vtt")
+        XCTAssertNil(EpisodeSubtitles(text: "<html><title>403</title></html>"))
+    }
+
     func testProfileParsingWithActiveSubscription() {
         let html = """
         <html><body>

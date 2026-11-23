@@ -436,6 +436,24 @@ struct Embed: Codable, Hashable {
     }
 }
 
+struct EpisodeSubtitles {
+    let data: Data
+    let fileExtension: String
+
+    init?(text: String) {
+        let header = text.drop(while: { $0.isWhitespace || $0 == "\u{FEFF}" })
+        if header.hasPrefix("WEBVTT") {
+            fileExtension = "vtt"
+        } else if header.hasPrefix("[Script Info]") ||
+                    (header.hasPrefix("[V4") && header.contains("[Events]")) {
+            fileExtension = "ass"
+        } else {
+            return nil
+        }
+        data = Data(text.utf8)
+    }
+}
+
 // MARK: - Site Pages Models
 
 struct Profile: Codable, Hashable, Identifiable {

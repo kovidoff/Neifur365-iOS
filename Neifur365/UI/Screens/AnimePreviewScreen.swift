@@ -57,6 +57,7 @@ struct AnimePreviewScreen: View {
     @State private var showStudioPicker = false
     @State private var expandDescription = false
     @State private var playerRequest: PlayerLaunchRequest?
+    @State private var episodeToPlay: Episode?
     @State private var viewerScreenshotUrl: String?
     @State private var toastMessage: String?
 
@@ -66,27 +67,26 @@ struct AnimePreviewScreen: View {
     private var episodes: [Episode] { fullSeries?.playable ?? [] }
     private var watchedCount: Int { listed?.entry.watched ?? 0 }
 
-    private var nextEpisodeIndex: Int {
-        guard !episodes.isEmpty else { return 0 }
+    private var nextEpisodeIndex: Int? {
+        guard !episodes.isEmpty else { return nil }
+        var finishedThrough = watchedCount
         if let sid = activeSeriesId {
             let sidStr = String(sid)
             if let last = prefs.history.first(where: { $0.animeId == sidStr }) {
                 if !last.finished, let idx = episodes.firstIndex(where: { $0.number == last.episode }) {
                     return idx
                 }
-                if last.finished, let idx = episodes.firstIndex(where: { $0.number > last.episode }) {
-                    return idx
+                if last.finished {
+                    finishedThrough = max(finishedThrough, last.episode)
                 }
             }
         }
-        if watchedCount > 0, let idx = episodes.firstIndex(where: { $0.number > watchedCount }) {
-            return idx
-        }
-        return 0
+        if finishedThrough == 0 { return 0 }
+        return episodes.firstIndex(where: { $0.number > finishedThrough })
     }
 
     private var nextEpisode: Episode? {
-        guard episodes.indices.contains(nextEpisodeIndex) else { return nil }
+        guard let nextEpisodeIndex, episodes.indices.contains(nextEpisodeIndex) else { return nil }
         return episodes[nextEpisodeIndex]
     }
 
@@ -213,7 +213,12 @@ struct AnimePreviewScreen: View {
                 }
             }
         }
-        .sheet(isPresented: $showAllEpisodes) {
+        .sheet(isPresented: $showAllEpisodes, onDismiss: {
+            if let episodeToPlay {
+                self.episodeToPlay = nil
+                launchPlayer(episode: episodeToPlay)
+            }
+        }) {
             AllEpisodesSheet(
                 title: currentSeries?.title ?? route.title,
                 episodes: episodes,
@@ -221,8 +226,8 @@ struct AnimePreviewScreen: View {
                 nextEpisodeId: nextEpisode?.id,
                 downloads: downloads,
                 onPlay: { ep in
+                    episodeToPlay = ep
                     showAllEpisodes = false
-                    launchPlayer(episode: ep)
                 },
                 onDownload: { ep in
                     queueSingleDownload(ep)
@@ -263,8 +268,11 @@ struct AnimePreviewScreen: View {
                 }
 
             VStack(spacing: 16) {
-                PosterView(urlString: currentSeries?.bestPosterUrl ?? route.posterUrl, cornerRadius: 18, alignment: .top)
-                    .frame(width: 158, height: 234)
+                PosterView(
+                    urlString: currentSeries?.bestPosterUrl ?? route.posterUrl, cornerRadius: 18,
+                    alignment: .center, contentMode: .fit
+                )
+                    .frame(width: 144, height: 216)
                     .overlay(
                         RoundedRectangle(cornerRadius: 18, style: .continuous)
                             .stroke(Color.white.opacity(0.16), lineWidth: 0.8)
@@ -389,19 +397,20 @@ struct AnimePreviewScreen: View {
 
     private var actionsBlock: some View {
         VStack(spacing: 10) {
-            if let target = nextEpisode {
+            if let target = nextEpisode ?? episodes.first {
                 Button {
                     launchPlayer(episode: target)
                 } label: {
                     HStack(spacing: 8) {
                         Image(systemName: "play.fill")
                             .font(.system(size: 14, weight: .bold))
-                        Text(watchedCount > 0 ? "Продолжить · \(target.label)" : "Смотреть · \(target.label)")
+                        Text(nextEpisode == nil ? "Смотреть сначала" : "Смотреть · \(target.label)")
                             .font(.body.weight(.semibold))
                     }
                     .foregroundColor(Nf.ink)
                     .frame(maxWidth: .infinity)
-                    .frame(height: 50)
+                    .padding(.vertical, 12)
+                    .frame(minHeight: 50)
                     .background(Nf.violet, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
                 }
                 .buttonStyle(NfPressableStyle())
@@ -443,6 +452,7 @@ struct AnimePreviewScreen: View {
                             .frame(width: 52, height: 46)
                             .background(Nf.mint, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                     }
+                    .accessibilityLabel("Отметить ещё одну серию просмотренной")
                     .buttonStyle(NfPressableStyle())
                 }
 
@@ -455,10 +465,18 @@ struct AnimePreviewScreen: View {
                                 Label("Скачать \(next.label)", systemImage: "arrow.down.circle")
                             }
                         }
-                        Button {
-                            queueBatchDownload(count: 3)
-                        } label: {
-                            Label("Скачать следующие 3 серии", systemImage: "arrow.down.circle.fill")
+                        if nextEpisode != nil {
+                            Button {
+                                queueBatchDownload(count: 3)
+                            } label: {
+                                Label("Скачать следующие 3 серии", systemImage: "arrow.down.circle.fill")
+                            }
+                        } else if let first = episodes.first {
+                            Button {
+                                queueSingleDownload(first)
+                            } label: {
+                                Label("Скачать \(first.label)", systemImage: "arrow.down.circle")
+                            }
                         }
                     } label: {
                         Image(systemName: "arrow.down.circle")
@@ -471,6 +489,7 @@ struct AnimePreviewScreen: View {
                                     .stroke(Color.white.opacity(0.08), lineWidth: 0.9)
                             )
                     }
+                    .accessibilityLabel("Скачать серии")
                 }
             }
         }
@@ -509,7 +528,7 @@ struct AnimePreviewScreen: View {
 
                 Spacer()
 
-                if loadingStudios {
+                if loadingStudios && playerRequest == nil {
                     ProgressView().scaleEffect(0.8)
                 } else {
                     Image(systemName: "chevron.right")
@@ -646,25 +665,24 @@ struct AnimePreviewScreen: View {
 
                 Spacer()
 
-                if loading {
+                if loading && episodes.isEmpty && playerRequest == nil {
                     ProgressView().scaleEffect(0.85)
-                } else if episodes.count > 8 {
-                    Button("Все серии") {
-                        showAllEpisodes = true
-                    }
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundColor(Nf.violet)
                 }
             }
 
             if let errorMessage {
-                Text(errorMessage)
-                    .font(.footnote)
-                    .foregroundColor(Nf.red)
-                    .padding(14)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Nf.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            } else if !episodes.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(errorMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Button("Повторить") { Task { await loadAll(force: true) } }
+                        .buttonStyle(.bordered)
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Nf.surface, in: RoundedRectangle(cornerRadius: 16))
+            }
+            if !episodes.isEmpty {
                 let preview = previewEpisodes()
                 VStack(spacing: 0) {
                     ForEach(Array(preview.enumerated()), id: \.element.id) { idx, ep in
@@ -707,7 +725,7 @@ struct AnimePreviewScreen: View {
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
                         .stroke(Color.white.opacity(0.06), lineWidth: 0.7)
                 )
-            } else if !loading {
+            } else if !loading && errorMessage == nil {
                 Text("Нет доступных серий")
                     .font(.subheadline)
                     .foregroundColor(Nf.textMute)
@@ -864,7 +882,8 @@ struct AnimePreviewScreen: View {
 
     private func previewEpisodes() -> [Episode] {
         guard episodes.count > 8 else { return episodes }
-        let start = max(0, min(nextEpisodeIndex - 1, episodes.count - 8))
+        let focus = nextEpisodeIndex ?? episodes.count
+        let start = max(0, min(focus - 1, episodes.count - 8))
         return Array(episodes[start..<min(start + 8, episodes.count)])
     }
 
@@ -909,7 +928,7 @@ struct AnimePreviewScreen: View {
             showSignIn = true
             return
         }
-        guard let series = currentSeries, !episodes.isEmpty else { return }
+        guard let series = currentSeries, let nextEpisodeIndex else { return }
         let slice = Array(episodes[nextEpisodeIndex..<episodes.count])
         Task {
             let started = await downloads.enqueueBatch(series: series, episodes: slice, studio: selectedStudio, count: count)
@@ -932,7 +951,9 @@ struct AnimePreviewScreen: View {
     }
 
     private func loadAll(force: Bool = false) async {
+        guard !loading, !loadingStudios else { return }
         loading = true
+        defer { loading = false }
         errorMessage = nil
 
         do {
@@ -947,28 +968,22 @@ struct AnimePreviewScreen: View {
             }
 
             let fetched = try await app.a365.series(id: sid, force: force)
+            try Task.checkCancellation()
             fullSeries = fetched
             resolvedSeriesId = fetched.id
-            loading = false
-
             let malId = fetched.myAnimeListId > 0 ? fetched.myAnimeListId : (route.malId ?? 0)
             if malId > 0 {
-                Task {
-                    if let detail = try? await app.shikimori.detail(malId: malId) {
-                        shiki = detail
-                    }
-                }
-                Task {
-                    if let loadedCast = try? await app.shikimori.cast(malId: malId) {
-                        cast = loadedCast
-                    }
-                }
+                async let detail = try? app.shikimori.detail(malId: malId)
+                async let characters = try? app.shikimori.cast(malId: malId)
+                await loadStudios(for: fetched)
+                let (updatedDetail, updatedCast) = await (detail, characters)
+                if let updatedDetail, !Task.isCancelled { shiki = updatedDetail }
+                if let updatedCast, !Task.isCancelled { cast = updatedCast }
+            } else {
+                await loadStudios(for: fetched)
             }
-
-            await loadStudios(for: fetched)
         } catch {
-            loading = false
-            errorMessage = error.userMessage
+            if !Task.isCancelled { errorMessage = error.userMessage }
         }
     }
 
@@ -976,8 +991,10 @@ struct AnimePreviewScreen: View {
         let eps = series.playable
         guard !eps.isEmpty else { return }
         loadingStudios = true
-        let scope = eps.count <= 60 ? eps : Array(eps[max(0, nextEpisodeIndex - 10)..<min(eps.count, nextEpisodeIndex + 40)])
-        if let trs = try? await app.a365.translations(episodeIds: scope.map(\.id)) {
+        defer { loadingStudios = false }
+        let focus = nextEpisodeIndex ?? max(0, eps.count - 1)
+        let scope = eps.count <= 60 ? eps : Array(eps[max(0, focus - 10)..<min(eps.count, focus + 40)])
+        if let trs = try? await app.a365.translations(episodeIds: scope.map(\.id)), !Task.isCancelled {
             let built = Studios.build(trs)
             groupedStudios = Studios.grouped(built, episodes: scope)
             let chosen = Studios.choose(
@@ -990,7 +1007,6 @@ struct AnimePreviewScreen: View {
             )
             selectedStudio = chosen
         }
-        loadingStudios = false
     }
 }
 

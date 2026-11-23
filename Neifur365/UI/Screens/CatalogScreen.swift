@@ -33,32 +33,38 @@ final class CatalogViewModel: ObservableObject {
     @Published private(set) var loadingMore = false
     @Published private(set) var hasMore = true
     @Published private(set) var errorMessage: String?
+    @Published private(set) var pageError: String?
 
     private let pageSize = 30
     private var loadTask: Task<Void, Never>?
+    private var pageTask: Task<Void, Never>?
+    private var nextOffset = 0
 
     var hasActiveFilters: Bool {
         airingOnly || selectedType != nil || selectedYear != nil || selectedGenre != nil
     }
 
-    func resetFilters(using api: Anime365Client) {
+    func resetFilters() {
         airingOnly = false
         selectedType = nil
         selectedYear = nil
         selectedGenre = nil
-        reload(using: api, debounce: false)
     }
 
-    func reload(using api: Anime365Client, debounce: Bool) {
+    @discardableResult
+    func reload(using api: Anime365Client, debounce: Bool) -> Task<Void, Never> {
         loadTask?.cancel()
-        loadTask = Task {
+        pageTask?.cancel()
+        loadingMore = false
+        loading = true
+        errorMessage = nil
+        pageError = nil
+        hasMore = false
+        let task = Task {
             if debounce {
                 try? await Task.sleep(nanoseconds: 350_000_000)
                 if Task.isCancelled { return }
             }
-            loading = true
-            errorMessage = nil
-            hasMore = true
             do {
                 let page = try await api.catalog(
                     query: query,
@@ -70,7 +76,9 @@ final class CatalogViewModel: ObservableObject {
                     genre: selectedGenre?.id
                 )
                 if Task.isCancelled { return }
-                items = page
+                var ids = Set<Int64>()
+                items = page.filter { ids.insert($0.id).inserted }
+                nextOffset = page.count
                 hasMore = page.count >= pageSize
             } catch {
                 if Task.isCancelled { return }
@@ -78,22 +86,29 @@ final class CatalogViewModel: ObservableObject {
             }
             loading = false
         }
+        loadTask = task
+        return task
     }
 
     func loadMoreIfNeeded(currentItem: Series, using api: Anime365Client) {
-        guard !loading, !loadingMore, hasMore else { return }
+        guard pageError == nil else { return }
         let thresholdIndex = max(0, items.count - 6)
         guard let idx = items.firstIndex(where: { $0.id == currentItem.id }), idx >= thresholdIndex else { return }
+        loadMore(using: api)
+    }
 
+    func loadMore(using api: Anime365Client) {
+        guard !loading, !loadingMore, hasMore else { return }
+        pageError = nil
         loadingMore = true
-        let offset = items.count
+        let offset = nextOffset
         let q = query
         let t = selectedType?.rawValue
         let airing = airingOnly
         let year = selectedYear
         let genre = selectedGenre?.id
 
-        Task {
+        pageTask = Task {
             do {
                 let page = try await api.catalog(
                     query: q,
@@ -104,12 +119,15 @@ final class CatalogViewModel: ObservableObject {
                     year: year,
                     genre: genre
                 )
-                let existing = Set(items.map(\.id))
-                let fresh = page.filter { !existing.contains($0.id) }
+                guard !Task.isCancelled else { return }
+                var existing = Set(items.map(\.id))
+                let fresh = page.filter { existing.insert($0.id).inserted }
                 items.append(contentsOf: fresh)
+                nextOffset += page.count
                 hasMore = page.count >= pageSize && !fresh.isEmpty
             } catch {
-                hasMore = false
+                guard !Task.isCancelled else { return }
+                pageError = error.userMessage
             }
             loadingMore = false
         }
@@ -144,7 +162,7 @@ struct CatalogScreen: View {
                             .foregroundColor(Nf.textDim)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if let err = vm.errorMessage, vm.items.isEmpty {
+                } else if let err = vm.errorMessage {
                     VStack(spacing: 14) {
                         Image(systemName: "wifi.slash")
                             .font(.system(size: 36))
@@ -173,7 +191,7 @@ struct CatalogScreen: View {
                             .foregroundColor(Nf.text)
                         if vm.hasActiveFilters {
                             Button("Сбросить фильтры") {
-                                vm.resetFilters(using: app.a365)
+                                vm.resetFilters()
                             }
                             .buttonStyle(.bordered)
                         }
@@ -382,10 +400,21 @@ struct CatalogScreen: View {
             if vm.loadingMore {
                 ProgressView()
                     .padding(.vertical, 18)
+            } else if let error = vm.pageError {
+                VStack(spacing: 8) {
+                    Text(error).font(.footnote).foregroundStyle(.secondary)
+                    Button("Загрузить ещё") { vm.loadMore(using: app.a365) }
+                        .buttonStyle(.bordered)
+                }
+                .padding(.vertical, 12)
+            } else if vm.hasMore && !vm.loading {
+                Button("Показать ещё") { vm.loadMore(using: app.a365) }
+                    .buttonStyle(.bordered)
+                    .padding(.vertical, 12)
             }
         }
         .refreshable {
-            vm.reload(using: app.a365, debounce: false)
+            await vm.reload(using: app.a365, debounce: false).value
         }
     }
 

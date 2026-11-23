@@ -26,7 +26,11 @@ struct LibraryScreen: View {
     var body: some View {
         NavigationStack {
             Group {
-                if !account.isSignedIn {
+                if account.state == .unknown {
+                    ProgressView("Проверяем вход…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Nf.ink.ignoresSafeArea())
+                } else if !account.isSignedIn {
                     signedOutState
                 } else if !lists.loaded && lists.error == nil {
                     VStack(spacing: 12) {
