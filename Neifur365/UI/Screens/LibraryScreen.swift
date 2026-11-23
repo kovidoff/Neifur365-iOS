@@ -28,11 +28,11 @@ struct LibraryScreen: View {
             Group {
                 if !account.isSignedIn {
                     signedOutState
-                } else if lists.loading && !lists.loaded {
+                } else if !lists.loaded && lists.error == nil {
                     VStack(spacing: 12) {
                         ProgressView()
                         Text("Загрузка списков…")
-                            .font(NfType.caption)
+                            .font(.subheadline)
                             .foregroundColor(Nf.textDim)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -43,13 +43,13 @@ struct LibraryScreen: View {
                             .font(.system(size: 36))
                             .foregroundColor(Nf.amber)
                         Text("Не удалось загрузить списки")
-                            .font(NfType.title)
+                            .font(.headline)
                             .foregroundColor(Nf.text)
                         Text(err)
-                            .font(NfType.body)
+                            .font(.subheadline)
                             .foregroundColor(Nf.textDim)
                             .multilineTextAlignment(.center)
-                            .padding(.horizontal, 24)
+                            .padding(.horizontal, 28)
                         Button("Повторить") {
                             lists.refresh()
                         }
@@ -103,7 +103,7 @@ struct LibraryScreen: View {
             .overlay(alignment: .bottom) {
                 if let toastMessage {
                     Text(toastMessage)
-                        .font(NfType.label)
+                        .font(.subheadline.weight(.medium))
                         .foregroundColor(Nf.text)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 10)
@@ -118,6 +118,11 @@ struct LibraryScreen: View {
                     lists.refreshIfStale()
                 }
             }
+            .onChange(of: account.isSignedIn) { signedIn in
+                if signedIn {
+                    lists.refreshIfStale(maxAge: 0)
+                }
+            }
         }
     }
 
@@ -127,18 +132,18 @@ struct LibraryScreen: View {
                 .font(.system(size: 52))
                 .foregroundColor(Nf.violet)
             Text(account.expired ? "Сессия истекла" : "Ваши списки Anime 365")
-                .font(NfType.display)
+                .font(.title3.weight(.bold))
                 .foregroundColor(Nf.text)
             Text("Войдите в аккаунт Anime 365, чтобы видеть «Смотрю», «Запланировано», отметки серий и новые выпуски онгоингов.")
-                .font(NfType.body)
+                .font(.subheadline)
                 .foregroundColor(Nf.textDim)
                 .multilineTextAlignment(.center)
-                .padding(.horizontal, 28)
+                .padding(.horizontal, 32)
             Button {
                 showSignIn = true
             } label: {
                 Text("Войти в Anime 365")
-                    .font(NfType.title)
+                    .font(.body.weight(.semibold))
                     .padding(.horizontal, 22)
                     .padding(.vertical, 10)
             }
@@ -177,16 +182,16 @@ struct LibraryScreen: View {
                     } label: {
                         HStack(spacing: 6) {
                             Text(st.title)
-                                .font(NfType.label)
+                                .font(.subheadline.weight(.semibold))
                             if count > 0 {
                                 Text("\(count)")
-                                    .font(NfType.caption)
-                                    .foregroundColor(active ? Nf.ink.opacity(0.8) : Nf.textMute)
+                                    .font(.caption.weight(.bold))
+                                    .foregroundColor(active ? Nf.ink.opacity(0.78) : Nf.textMute)
                                     .monospacedDigit()
                             }
                         }
                         .foregroundColor(active ? Nf.ink : Nf.textDim)
-                        .padding(.horizontal, 13)
+                        .padding(.horizontal, 14)
                         .padding(.vertical, 8)
                         .background(active ? st.tintColor : Nf.surfaceHi, in: Capsule())
                     }
@@ -242,43 +247,49 @@ struct LibraryScreen: View {
     }
 
     private var posterGridView: some View {
-        let columns = [GridItem(.adaptive(minimum: 108, maximum: 140), spacing: 12)]
+        let columns = Array(repeating: GridItem(.flexible(), spacing: 12), count: 3)
         return ScrollView {
             LazyVGrid(columns: columns, alignment: .leading, spacing: 16) {
                 ForEach(displayedItems) { item in
                     NavigationLink(value: AnimeRoute(listed: item)) {
                         VStack(alignment: .leading, spacing: 6) {
-                            ZStack(alignment: .topLeading) {
-                                PosterView(urlString: item.posterUrl, cornerRadius: 14)
-                                    .aspectRatio(2.0 / 3.0, contentMode: .fit)
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                            .stroke(Nf.line.opacity(0.6), lineWidth: 0.5)
-                                    )
-                                if let score = item.entry.score {
-                                    HStack(spacing: 2) {
-                                        Image(systemName: "star.fill")
-                                            .font(.system(size: 9))
-                                            .foregroundColor(Nf.amber)
-                                        Text("\(score)")
-                                            .font(.system(size: 11, weight: .bold))
-                                            .foregroundColor(Nf.text)
-                                    }
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 3)
-                                    .background(.ultraThinMaterial, in: Capsule())
-                                    .padding(6)
+                            Color.clear
+                                .aspectRatio(2.0 / 3.0, contentMode: .fit)
+                                .overlay {
+                                    PosterView(urlString: item.posterUrl, cornerRadius: 12, alignment: .top)
                                 }
-                            }
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                        .stroke(Color.white.opacity(0.08), lineWidth: 0.6)
+                                )
+                                .overlay(alignment: .topLeading) {
+                                    if let score = item.entry.score {
+                                        HStack(spacing: 2) {
+                                            Image(systemName: "star.fill")
+                                                .font(.system(size: 8.5))
+                                                .foregroundColor(Nf.amber)
+                                            Text("\(score)")
+                                                .font(.system(size: 10.5, weight: .bold))
+                                                .foregroundColor(.white)
+                                                .monospacedDigit()
+                                        }
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 3)
+                                        .background(.ultraThinMaterial, in: Capsule())
+                                        .padding(6)
+                                    }
+                                }
+
                             Text(item.displayTitle)
-                                .font(NfType.label)
+                                .font(.caption.weight(.semibold))
                                 .foregroundColor(Nf.text)
                                 .lineLimit(2)
                                 .multilineTextAlignment(.leading)
+
                             let progress = ListProgress.line(item)
                             if !progress.isEmpty {
                                 Text(progress)
-                                    .font(NfType.caption)
+                                    .font(.caption2)
                                     .foregroundColor(Nf.textMute)
                                     .lineLimit(1)
                             }
@@ -297,32 +308,44 @@ struct LibraryScreen: View {
     }
 
     private var emptyListView: some View {
-        VStack(spacing: 12) {
-            Image(systemName: searchQuery.isEmpty ? selectedStatus.systemImage : "magnifyingglass")
-                .font(.system(size: 36))
-                .foregroundColor(Nf.textMute)
-            Text(searchQuery.isEmpty ? "В разделе «\(selectedStatus.title)» пока пусто" : "Ничего не найдено")
-                .font(NfType.title)
-                .foregroundColor(Nf.text)
+        ScrollView {
+            VStack(spacing: 12) {
+                Spacer(minLength: 90)
+                Image(systemName: searchQuery.isEmpty ? selectedStatus.systemImage : "magnifyingglass")
+                    .font(.system(size: 38))
+                    .foregroundColor(Nf.textMute)
+                Text(searchQuery.isEmpty ? "В разделе «\(selectedStatus.title)» пока пусто" : "Ничего не найдено")
+                    .font(.headline)
+                    .foregroundColor(Nf.text)
 
-            if !otherMatches.isEmpty {
-                VStack(spacing: 8) {
-                    Text("Найдено в других вкладках:")
-                        .font(NfType.caption)
-                        .foregroundColor(Nf.textDim)
-                    HStack(spacing: 8) {
-                        ForEach(otherMatches, id: \.0) { st, count in
-                            Button("\(st.title) (\(count))") {
-                                selectedStatus = st
+                if searchQuery.isEmpty {
+                    Text("Потяните вниз, чтобы обновить списки с сайта.")
+                        .font(.caption)
+                        .foregroundColor(Nf.textMute)
+                }
+
+                if !otherMatches.isEmpty {
+                    VStack(spacing: 8) {
+                        Text("Найдено в других вкладках:")
+                            .font(.caption)
+                            .foregroundColor(Nf.textDim)
+                        HStack(spacing: 8) {
+                            ForEach(otherMatches, id: \.0) { st, count in
+                                Button("\(st.title) (\(count))") {
+                                    selectedStatus = st
+                                }
+                                .buttonStyle(.bordered)
                             }
-                            .buttonStyle(.bordered)
                         }
                     }
+                    .padding(.top, 4)
                 }
-                .padding(.top, 4)
             }
+            .frame(maxWidth: .infinity)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .refreshable {
+            lists.refresh()
+        }
     }
 
     @ViewBuilder
@@ -404,13 +427,13 @@ private struct ListedProgressRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            PosterView(urlString: item.posterUrl, cornerRadius: 10)
-                .frame(width: 56, height: 82)
+            PosterView(urlString: item.posterUrl, cornerRadius: 10, alignment: .top)
+                .frame(width: 54, height: 80)
 
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 5) {
                 HStack(alignment: .top, spacing: 6) {
                     Text(item.displayTitle)
-                        .font(NfType.title)
+                        .font(.subheadline.weight(.semibold))
                         .foregroundColor(Nf.text)
                         .lineLimit(2)
 
@@ -427,7 +450,7 @@ private struct ListedProgressRow: View {
                 }
 
                 Text(ListProgress.line(item))
-                    .font(NfType.caption)
+                    .font(.caption)
                     .foregroundColor(Nf.textDim)
                     .lineLimit(1)
 

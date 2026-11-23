@@ -93,8 +93,8 @@ final class ListsStore: ObservableObject {
             .sink { [weak self] st in
                 guard let self else { return }
                 switch st {
-                case .signedIn:
-                    self.refresh()
+                case .signedIn(let profile):
+                    self.refresh(userId: profile.id)
                 case .signedOut:
                     self.refreshTask?.cancel()
                     self.loading = false
@@ -201,15 +201,15 @@ final class ListsStore: ObservableObject {
         refresh()
     }
 
-    func refresh() {
-        guard let user = account.profile else { return }
+    func refresh(userId explicitUserId: Int64? = nil) {
+        guard let userId = explicitUserId ?? account.profile?.id else { return }
         refreshTask?.cancel()
         loading = true
         error = nil
 
         refreshTask = Task {
             do {
-                let entries = try await api.allLists(userId: user.id)
+                let entries = try await api.allLists(userId: userId)
                 let cards = (try? await api.cards(ids: entries.map(\.seriesId))) ?? []
                 let cardsById = Dictionary(uniqueKeysWithValues: cards.map { ($0.id, $0) })
                 let known = self.titles

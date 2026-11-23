@@ -89,23 +89,35 @@ struct SettingsSheet: View {
     private func subscriptionSubtitle(_ profile: Profile) -> some View {
         if profile.subscribed == true {
             if let until = profile.subscribedUntil {
-                Text("Подписка до \(until)")
-                    .font(NfType.caption)
+                Text("Подписка до \(formatRussianDate(until))")
+                    .font(.caption)
                     .foregroundColor(Nf.mint)
             } else {
                 Text("Подписка активна")
-                    .font(NfType.caption)
+                    .font(.caption)
                     .foregroundColor(Nf.mint)
             }
         } else if profile.subscribed == false {
             Text("Подписка не оплачена")
-                .font(NfType.caption)
+                .font(.caption)
                 .foregroundColor(Nf.amber)
         } else {
             Text("ID \(profile.id)")
-                .font(NfType.caption)
+                .font(.caption)
                 .foregroundColor(Nf.textMute)
         }
+    }
+
+    private func formatRussianDate(_ iso: String) -> String {
+        let inFmt = DateFormatter()
+        inFmt.calendar = Calendar(identifier: .gregorian)
+        inFmt.dateFormat = "yyyy-MM-dd"
+        guard let date = inFmt.date(from: iso) else { return iso }
+        let outFmt = DateFormatter()
+        outFmt.locale = Locale(identifier: "ru_RU")
+        outFmt.dateStyle = .long
+        outFmt.timeStyle = .none
+        return outFmt.string(from: date)
     }
 
     private var mirrorsSection: some View {
@@ -172,17 +184,20 @@ struct SettingsSheet: View {
                 }
             }
 
-            HStack {
-                TextField("Добавить своё зеркало (домен)", text: $customMirrorInput)
+            HStack(spacing: 10) {
+                TextField("Своё зеркало (домен)", text: $customMirrorInput)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .keyboardType(.URL)
-                Button("Добавить") {
+                Button {
                     if let added = app.a365.addCustomMirror(customMirrorInput) {
                         customMirrorInput = ""
                         app.a365.pickMirror(added)
                         Task { await probeMirrors() }
                     }
+                } label: {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.system(size: 22))
                 }
                 .disabled(customMirrorInput.trimmingCharacters(in: .whitespaces).isEmpty)
             }

@@ -1,35 +1,38 @@
 import NukeUI
 import SwiftUI
 
+/// Clipped remote poster view that never overflows its proposed frame.
 struct PosterView: View {
     let urlString: String?
     var cornerRadius: CGFloat = 14
+    var alignment: Alignment = .top
 
     var body: some View {
-        ZStack {
-            Nf.surfaceHi
-            if let urlString, let url = URL(string: urlString) {
-                LazyImage(url: url) { state in
-                    if let image = state.image {
-                        image
-                            .resizable()
-                            .scaledToFill()
-                    } else if state.error != nil {
-                        Image(systemName: "film")
-                            .font(.system(size: 22))
-                            .foregroundColor(Nf.textMute)
-                    } else {
-                        Nf.surfaceHi
+        Color.clear
+            .background(Nf.surfaceHi)
+            .overlay(alignment: alignment) {
+                if let urlString, let url = URL(string: urlString) {
+                    LazyImage(url: url) { state in
+                        if let image = state.image {
+                            image
+                                .resizable()
+                                .scaledToFill()
+                        } else if state.error != nil {
+                            Image(systemName: "film")
+                                .font(.system(size: 22))
+                                .foregroundColor(Nf.textMute)
+                        } else {
+                            Nf.surfaceHi
+                        }
                     }
+                } else {
+                    Image(systemName: "film")
+                        .font(.system(size: 22))
+                        .foregroundColor(Nf.textMute)
                 }
-            } else {
-                Image(systemName: "film")
-                    .font(.system(size: 22))
-                    .foregroundColor(Nf.textMute)
             }
-        }
-        .clipped()
-        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .clipped()
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
     }
 }
 
@@ -38,24 +41,30 @@ struct AvatarView: View {
     var size: CGFloat = 40
 
     var body: some View {
-        ZStack {
-            Circle().fill(Nf.surfaceHi)
-            if let urlString, let url = URL(string: urlString) {
-                LazyImage(url: url) { state in
-                    if let image = state.image {
-                        image.resizable().scaledToFill()
-                    } else {
-                        Image(systemName: "person.fill")
-                            .foregroundColor(Nf.textMute)
+        Color.clear
+            .background(Nf.surfaceHi)
+            .overlay {
+                if let urlString, let url = URL(string: urlString) {
+                    LazyImage(url: url) { state in
+                        if let image = state.image {
+                            image
+                                .resizable()
+                                .scaledToFill()
+                        } else {
+                            Image(systemName: "person.fill")
+                                .font(.system(size: size * 0.45))
+                                .foregroundColor(Nf.textMute)
+                        }
                     }
+                } else {
+                    Image(systemName: "person.fill")
+                        .font(.system(size: size * 0.45))
+                        .foregroundColor(Nf.textMute)
                 }
-            } else {
-                Image(systemName: "person.fill")
-                    .foregroundColor(Nf.textMute)
             }
-        }
-        .frame(width: size, height: size)
-        .clipShape(Circle())
+            .frame(width: size, height: size)
+            .clipped()
+            .clipShape(Circle())
     }
 }
 
@@ -71,72 +80,78 @@ extension ListStatus {
     }
 }
 
+/// Crisp 2:3 anime poster card for horizontal carousels.
 struct AnimePosterCard: View {
     let series: Series
     var listStatus: ListStatus? = nil
     var badgeText: String? = nil
     var badgeColor: Color = Nf.mint
-    var width: CGFloat? = 132
+    var width: CGFloat = 134
+
+    private var posterHeight: CGFloat { round(width * 1.48) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ZStack(alignment: .topLeading) {
-                PosterView(urlString: series.bestPosterUrl, cornerRadius: 14)
-                    .aspectRatio(2.0 / 3.0, contentMode: .fit)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .stroke(Nf.line.opacity(0.6), lineWidth: 0.5)
-                    )
-
-                HStack {
-                    if let badgeText {
-                        Text(badgeText)
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundColor(Nf.ink)
+        VStack(alignment: .leading, spacing: 7) {
+            PosterView(urlString: series.bestPosterUrl, cornerRadius: 14, alignment: .top)
+                .frame(width: width, height: posterHeight)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 0.7)
+                )
+                .overlay(alignment: .top) {
+                    HStack(alignment: .center) {
+                        if let badgeText {
+                            Text(badgeText)
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundColor(Nf.ink)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 3)
+                                .background(badgeColor, in: Capsule())
+                        } else if let score = series.score {
+                            HStack(spacing: 3) {
+                                Image(systemName: "star.fill")
+                                    .font(.system(size: 9))
+                                    .foregroundColor(Nf.amber)
+                                Text(String(format: "%.1f", score))
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundColor(.white)
+                                    .monospacedDigit()
+                            }
                             .padding(.horizontal, 7)
                             .padding(.vertical, 3)
-                            .background(badgeColor, in: Capsule())
-                    } else if let score = series.score {
-                        HStack(spacing: 2) {
-                            Image(systemName: "star.fill")
-                                .font(.system(size: 9))
-                                .foregroundColor(Nf.amber)
-                            Text(String(format: "%.1f", score))
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundColor(Nf.text)
+                            .background(.ultraThinMaterial, in: Capsule())
                         }
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(.ultraThinMaterial, in: Capsule())
-                    }
 
-                    Spacer(minLength: 0)
+                        Spacer(minLength: 4)
 
-                    if let listStatus {
-                        Image(systemName: listStatus.systemImage)
-                            .font(.system(size: 14))
-                            .foregroundColor(listStatus.tintColor)
-                            .padding(4)
-                            .background(.ultraThinMaterial, in: Circle())
+                        if let listStatus {
+                            Image(systemName: listStatus.systemImage)
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(listStatus.tintColor)
+                                .padding(4)
+                                .background(.ultraThinMaterial, in: Circle())
+                        }
                     }
+                    .padding(7)
                 }
-                .padding(6)
-            }
 
-            Text(series.title)
-                .font(NfType.label)
-                .foregroundColor(Nf.text)
-                .lineLimit(2)
-                .multilineTextAlignment(.leading)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(series.title)
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundColor(Nf.text)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
 
-            if let subtitle = metaLine {
-                Text(subtitle)
-                    .font(NfType.caption)
-                    .foregroundColor(Nf.textMute)
-                    .lineLimit(1)
+                if let subtitle = metaLine {
+                    Text(subtitle)
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundColor(Nf.textMute)
+                        .lineLimit(1)
+                }
             }
+            .frame(width: width, alignment: .topLeading)
         }
-        .frame(width: width, alignment: .leading)
+        .frame(width: width, alignment: .topLeading)
     }
 
     private var metaLine: String? {

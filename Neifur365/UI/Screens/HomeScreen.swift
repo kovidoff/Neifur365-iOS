@@ -45,6 +45,7 @@ struct HomeScreen: View {
     @EnvironmentObject private var prefs: Prefs
 
     @StateObject private var vm = HomeViewModel()
+    @State private var heroIndex = 0
     @State private var showSettings = false
     @State private var showSignIn = false
     @State private var editingSeries: Series?
@@ -62,7 +63,7 @@ struct HomeScreen: View {
                     VStack(spacing: 12) {
                         ProgressView()
                         Text("Загрузка каталога…")
-                            .font(NfType.caption)
+                            .font(.subheadline)
                             .foregroundColor(Nf.textDim)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -73,13 +74,13 @@ struct HomeScreen: View {
                             .font(.system(size: 38))
                             .foregroundColor(Nf.textMute)
                         Text("Не получилось загрузить каталог")
-                            .font(NfType.title)
+                            .font(.headline)
                             .foregroundColor(Nf.text)
                         Text(err)
-                            .font(NfType.body)
+                            .font(.subheadline)
                             .foregroundColor(Nf.textDim)
                             .multilineTextAlignment(.center)
-                            .padding(.horizontal, 24)
+                            .padding(.horizontal, 28)
                         Button("Повторить") {
                             Task { await vm.load(using: app.a365, force: true) }
                         }
@@ -97,9 +98,10 @@ struct HomeScreen: View {
                         showSettings = true
                     } label: {
                         if let avatar = account.profile?.avatarUrl {
-                            AvatarView(urlString: avatar, size: 28)
+                            AvatarView(urlString: avatar, size: 30)
                         } else {
                             Image(systemName: account.isSignedIn ? "person.crop.circle.fill" : "person.crop.circle")
+                                .font(.system(size: 20))
                         }
                     }
                     .accessibilityLabel("Профиль и настройки")
@@ -130,13 +132,14 @@ struct HomeScreen: View {
 
     private func feedScroll(_ feed: HomeFeed) -> some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 24) {
+            LazyVStack(alignment: .leading, spacing: 26) {
                 if !account.isSignedIn && account.state != .unknown {
                     signInBanner
                 }
 
-                if !feed.ongoing.isEmpty {
-                    heroCarousel(Array(feed.ongoing.prefix(6)))
+                let heroItems = Array(feed.ongoing.prefix(6))
+                if !heroItems.isEmpty {
+                    heroCarousel(heroItems)
                 }
 
                 if !freshWatching.isEmpty {
@@ -157,8 +160,8 @@ struct HomeScreen: View {
                     animeRow(title: "Полнометражные", items: feed.movies)
                 }
             }
-            .padding(.top, 6)
-            .padding(.bottom, 24)
+            .padding(.top, 8)
+            .padding(.bottom, 32)
         }
         .background(Nf.ink.ignoresSafeArea())
         .refreshable {
@@ -175,26 +178,26 @@ struct HomeScreen: View {
         } label: {
             HStack(spacing: 12) {
                 Image(systemName: "person.crop.circle.badge.plus")
-                    .font(.system(size: 26))
+                    .font(.system(size: 24))
                     .foregroundColor(Nf.violet)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(account.expired ? "Сессия истекла — войдите снова" : "Войдите в Anime 365")
-                        .font(NfType.title)
+                        .font(.subheadline.weight(.semibold))
                         .foregroundColor(Nf.text)
                     Text("Синхронизация списков, новых серий и просмотр видео")
-                        .font(NfType.caption)
+                        .font(.caption)
                         .foregroundColor(Nf.textDim)
                 }
-                Spacer()
+                Spacer(minLength: 8)
                 Image(systemName: "chevron.right")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(Nf.textMute)
             }
             .padding(14)
-            .background(Nf.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .background(Nf.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(Nf.violet.opacity(0.35), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Nf.violet.opacity(0.32), lineWidth: 1)
             )
         }
         .buttonStyle(NfPressableStyle())
@@ -202,77 +205,43 @@ struct HomeScreen: View {
     }
 
     private func heroCarousel(_ items: [Series]) -> some View {
-        TabView {
-            ForEach(items) { series in
-                NavigationLink(value: AnimeRoute(series: series)) {
-                    ZStack(alignment: .bottomLeading) {
-                        PosterView(urlString: series.bestPosterUrl, cornerRadius: 22)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                        LinearGradient(
-                            colors: [.clear, Nf.ink.opacity(0.45), Nf.ink.opacity(0.95)],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack(spacing: 6) {
-                                Text("ОНГОИНГ")
-                                    .font(NfType.overline)
-                                    .foregroundColor(Nf.ink)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 3)
-                                    .background(Nf.mint, in: Capsule())
-
-                                if let score = series.score {
-                                    Label(String(format: "%.1f", score), systemImage: "star.fill")
-                                        .font(NfType.caption)
-                                        .foregroundColor(Nf.amber)
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 3)
-                                        .background(.ultraThinMaterial, in: Capsule())
-                                }
-                            }
-
-                            Text(series.title)
-                                .font(NfType.display)
-                                .foregroundColor(Nf.text)
-                                .lineLimit(2)
-                                .multilineTextAlignment(.leading)
-
-                            if let genres = series.genres, !genres.isEmpty {
-                                Text(genres.prefix(3).map(\.title).joined(separator: " · "))
-                                    .font(NfType.caption)
-                                    .foregroundColor(Nf.textDim)
-                                    .lineLimit(1)
-                            }
-                        }
-                        .padding(18)
+        VStack(spacing: 12) {
+            TabView(selection: $heroIndex) {
+                ForEach(Array(items.enumerated()), id: \.element.id) { idx, series in
+                    NavigationLink(value: AnimeRoute(series: series)) {
+                        HeroCard(series: series, listStatus: lists.get(series.id)?.status)
+                            .padding(.horizontal, 16)
                     }
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 22, style: .continuous)
-                            .stroke(Nf.line.opacity(0.7), lineWidth: 0.8)
-                    )
-                    .padding(.horizontal, 16)
+                    .buttonStyle(NfPressableStyle(pressedScale: 0.985))
+                    .contextMenu { quickMenu(for: series) }
+                    .tag(idx)
                 }
-                .buttonStyle(NfPressableStyle(pressedScale: 0.985))
-                .contextMenu { quickMenu(for: series) }
             }
+            .frame(height: 416)
+            .tabViewStyle(.page(indexDisplayMode: .never))
+
+            // Clean pill page indicator below the hero card
+            HStack(spacing: 6) {
+                ForEach(0..<items.count, id: \.self) { i in
+                    Capsule()
+                        .fill(i == heroIndex ? Nf.text : Color.white.opacity(0.24))
+                        .frame(width: i == heroIndex ? 22 : 6, height: 5)
+                        .animation(.spring(response: 0.28, dampingFraction: 0.8), value: heroIndex)
+                }
+            }
+            .frame(maxWidth: .infinity)
         }
-        .frame(height: 230)
-        .tabViewStyle(.page(indexDisplayMode: .automatic))
     }
 
     private var freshSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
                 Text("Новые серии")
-                    .font(NfType.section)
+                    .font(.title3.weight(.bold))
                     .foregroundColor(Nf.text)
                 Spacer()
                 Text("\(freshWatching.count)")
-                    .font(NfType.caption)
+                    .font(.caption.weight(.bold))
                     .foregroundColor(Nf.mint)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
@@ -289,8 +258,7 @@ struct HomeScreen: View {
                                     series: series,
                                     listStatus: item.status,
                                     badgeText: "+\(item.behind) нов.",
-                                    badgeColor: Nf.mint,
-                                    width: 132
+                                    badgeColor: Nf.mint
                                 )
                             }
                             .buttonStyle(NfPressableStyle())
@@ -304,9 +272,9 @@ struct HomeScreen: View {
     }
 
     private func animeRow(title: String, items: [Series]) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             Text(title)
-                .font(NfType.section)
+                .font(.title3.weight(.bold))
                 .foregroundColor(Nf.text)
                 .padding(.horizontal, 16)
 
@@ -316,8 +284,7 @@ struct HomeScreen: View {
                         NavigationLink(value: AnimeRoute(series: series)) {
                             AnimePosterCard(
                                 series: series,
-                                listStatus: lists.get(series.id)?.status,
-                                width: 132
+                                listStatus: lists.get(series.id)?.status
                             )
                         }
                         .buttonStyle(NfPressableStyle())
@@ -338,12 +305,28 @@ struct HomeScreen: View {
                 Label("Редактировать в списке", systemImage: "slider.horizontal.3")
             }
             Button {
-                Task { _ = await lists.set(seriesId: series.id, status: .watching, watched: lists.get(series.id)?.entry.watched ?? 0, score: lists.get(series.id)?.entry.score, series: series) }
+                Task {
+                    _ = await lists.set(
+                        seriesId: series.id,
+                        status: .watching,
+                        watched: lists.get(series.id)?.entry.watched ?? 0,
+                        score: lists.get(series.id)?.entry.score,
+                        series: series
+                    )
+                }
             } label: {
                 Label("В «Смотрю»", systemImage: ListStatus.watching.systemImage)
             }
             Button {
-                Task { _ = await lists.set(seriesId: series.id, status: .planned, watched: lists.get(series.id)?.entry.watched ?? 0, score: lists.get(series.id)?.entry.score, series: series) }
+                Task {
+                    _ = await lists.set(
+                        seriesId: series.id,
+                        status: .planned,
+                        watched: lists.get(series.id)?.entry.watched ?? 0,
+                        score: lists.get(series.id)?.entry.score,
+                        series: series
+                    )
+                }
             } label: {
                 Label("В «Запланировано»", systemImage: ListStatus.planned.systemImage)
             }
@@ -354,5 +337,100 @@ struct HomeScreen: View {
                 Label("Войти, чтобы добавить в список", systemImage: "person.crop.circle")
             }
         }
+    }
+}
+
+private struct HeroCard: View {
+    let series: Series
+    let listStatus: ListStatus?
+
+    var body: some View {
+        PosterView(urlString: series.bestPosterUrl, cornerRadius: 24, alignment: .top)
+            .frame(maxWidth: .infinity)
+            .frame(height: 416)
+            .overlay {
+                LinearGradient(
+                    stops: [
+                        .init(color: .clear, location: 0.0),
+                        .init(color: .clear, location: 0.44),
+                        .init(color: Nf.ink.opacity(0.68), location: 0.72),
+                        .init(color: Nf.ink.opacity(0.96), location: 1.0)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+            }
+            .overlay(alignment: .topTrailing) {
+                if let listStatus {
+                    HStack(spacing: 5) {
+                        Image(systemName: listStatus.systemImage)
+                            .foregroundColor(listStatus.tintColor)
+                        Text(listStatus.title)
+                            .foregroundColor(.white)
+                    }
+                    .font(.caption.weight(.semibold))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .padding(14)
+                }
+            }
+            .overlay(alignment: .bottomLeading) {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Text("ОНГОИНГ")
+                            .font(.system(size: 10, weight: .heavy))
+                            .tracking(0.8)
+                            .foregroundColor(Nf.ink)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Nf.mint, in: Capsule())
+
+                        if let score = series.score {
+                            HStack(spacing: 3) {
+                                Image(systemName: "star.fill")
+                                    .font(.system(size: 10))
+                                    .foregroundColor(Nf.amber)
+                                Text(String(format: "%.1f", score))
+                                    .font(.caption.weight(.bold))
+                                    .foregroundColor(.white)
+                                    .monospacedDigit()
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(.ultraThinMaterial, in: Capsule())
+                        }
+
+                        if series.year > 0 {
+                            Text(String(series.year))
+                                .font(.caption.weight(.semibold))
+                                .foregroundColor(.white.opacity(0.82))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(.ultraThinMaterial, in: Capsule())
+                        }
+                    }
+
+                    Text(series.title)
+                        .font(.title2.weight(.bold))
+                        .foregroundColor(.white)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+
+                    if let genres = series.genres, !genres.isEmpty {
+                        Text(genres.prefix(3).map(\.title).joined(separator: " · "))
+                            .font(.caption.weight(.medium))
+                            .foregroundColor(.white.opacity(0.76))
+                            .lineLimit(1)
+                    }
+                }
+                .padding(18)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .overlay(
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .stroke(Color.white.opacity(0.12), lineWidth: 0.8)
+            )
     }
 }

@@ -25,6 +25,14 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
+      - name: Cache Swift packages
+        uses: actions/cache@v4
+        with:
+          path: build/SourcePackages
+          key: spm-macos26-${{ hashFiles('project.yml') }}
+          restore-keys: |
+            spm-macos26-
+
       - name: Run unit tests
         run: |
           SIM_ID=$(xcrun simctl list devices available iPhone -j | python3 -c "
@@ -44,6 +52,7 @@ jobs:
             -project Neifur365.xcodeproj \
             -scheme Neifur365 \
             -destination "platform=iOS Simulator,id=$SIM_ID" \
+            -clonedSourcePackagesDirPath build/SourcePackages \
             CODE_SIGNING_ALLOWED=NO 2>&1 | tee build_test.log || {
               grep -E " error:|fatal error:|BUILD FAILED|\*\* TEST FAILED" build_test.log | head -n 20 | while IFS= read -r line; do
                 echo "::error::$line"
@@ -60,6 +69,7 @@ jobs:
             -configuration Release \
             -destination 'generic/platform=iOS' \
             -derivedDataPath build/DerivedData \
+            -clonedSourcePackagesDirPath build/SourcePackages \
             CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
