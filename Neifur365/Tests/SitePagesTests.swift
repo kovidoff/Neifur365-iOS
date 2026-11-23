@@ -22,6 +22,23 @@ final class SitePagesTests: XCTestCase {
         XCTAssertNil(EpisodeSubtitles(text: "<html><title>403</title></html>"))
     }
 
+    func testAvatarRequestsPreferActiveMirrorAfterOriginal() throws {
+        let requests = Anime365Client.avatarRequests(
+            urlString: "https://smotret-anime.org/avatars/42.jpg?v=7",
+            activeMirror: "smotret-anime.co"
+        )
+        XCTAssertEqual(requests.prefix(2).compactMap { $0.url?.host }, ["smotret-anime.org", "smotret-anime.co"])
+        let fallback = try XCTUnwrap(requests.dropFirst().first)
+        XCTAssertEqual(fallback.url?.absoluteString, "https://smotret-anime.co/avatars/42.jpg?v=7")
+        XCTAssertTrue(requests.allSatisfy { !$0.httpShouldHandleCookies })
+    }
+
+    func testAvatarRequestsDoNotRewriteExternalHost() {
+        let url = "https://images.example.org/profile.jpg"
+        let requests = Anime365Client.avatarRequests(urlString: url, activeMirror: "smotret-anime.co")
+        XCTAssertEqual(requests.compactMap { $0.url?.absoluteString }, [url])
+    }
+
     func testProfileParsingWithActiveSubscription() {
         let html = """
         <html><body>

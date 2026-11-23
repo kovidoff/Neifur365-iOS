@@ -110,6 +110,39 @@ final class Anime365Client {
         return Self.builtinMirrors.contains { host == $0 || host.hasSuffix(".\($0)") }
     }
 
+    static func avatarRequests(urlString: String?, activeMirror: String?) -> [URLRequest] {
+        guard let urlString,
+              let original = URL(string: urlString),
+              let host = original.host?.lowercased(),
+              let scheme = original.scheme?.lowercased(),
+              scheme == "https" || scheme == "http",
+              original.user == nil, original.password == nil else { return [] }
+
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
+        let preferred = activeMirror.flatMap { builtinMirrors.contains($0) ? [$0] : nil } ?? []
+        let knownMirrors = preferred + builtinMirrors
+        var urls = [original]
+
+        // Only rewrite avatars served by Anime 365 itself. Third-party image URLs stay intact.
+        if knownMirrors.contains(host),
+           var alternate = URLComponents(url: original, resolvingAgainstBaseURL: false),
+           alternate.user == nil, alternate.password == nil, alternate.port == nil {
+            for mirror in knownMirrors where mirror != host {
+                alternate.scheme = "https"
+                alternate.host = mirror
+                if let url = alternate.url, !urls.contains(url) { urls.append(url) }
+            }
+        }
+
+        return urls.map { url in
+            var request = URLRequest(url: url, timeoutInterval: 5)
+            request.httpShouldHandleCookies = false
+            request.setValue("Neifur365/\(version) (iOS)", forHTTPHeaderField: "User-Agent")
+            request.setValue("image/*", forHTTPHeaderField: "Accept")
+            return request
+        }
+    }
+
     // MARK: - Mirrors
 
     func mirrorList() -> [(String, MirrorOrigin)] {
@@ -283,6 +316,10 @@ final class Anime365Client {
     }
 
     private func fetchText(_ req: URLRequest) async throws -> String {
+        try await fetchPage(req).body
+    }
+
+    private func fetchPage(_ req: URLRequest) async throws -> (body: String, url: URL?) {
         let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse else {
             throw ApiError("Некорректный ответ сервера")
@@ -294,7 +331,7 @@ final class Anime365Client {
         if !(200...299).contains(http.statusCode) && http.statusCode != 403 {
             throw HttpError(code: http.statusCode, bodySnippet: String(body.prefix(300)))
         }
-        return body
+        return (body, http.url)
     }
 
     private func api<T: Decodable>(_ path: String, as type: T.Type) async throws -> T {
@@ -541,8 +578,8 @@ final class Anime365Client {
         guard !cookies.isEmpty else { return nil }
         return try await mirrored { base in
             guard let url = URL(string: "\(base)/users/profile?dynpage=1") else { return nil }
-            let html = try await fetchText(makeRequest(url: url))
-            return SitePages.profile(html: html, base: base)
+            let page = try await fetchPage(makeRequest(url: url))
+            return SitePages.profile(html: page.body, base: page.url?.absoluteString ?? url.absoluteString)
         }
     }
 

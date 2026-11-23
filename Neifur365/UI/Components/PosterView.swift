@@ -1,5 +1,7 @@
+import Nuke
 import NukeUI
 import SwiftUI
+import UIKit
 
 /// Clipped remote poster view that never overflows its proposed frame.
 struct PosterView: View {
@@ -38,25 +40,19 @@ struct PosterView: View {
 }
 
 struct AvatarView: View {
+    @EnvironmentObject private var prefs: Prefs
+    @State private var avatar: UIImage?
+
     let urlString: String?
     var size: CGFloat = 40
 
     var body: some View {
+        let requests = Anime365Client.avatarRequests(urlString: urlString, activeMirror: prefs.mirror)
         Color.clear
             .background(Nf.surfaceHi)
             .overlay {
-                if let urlString, let url = URL(string: urlString) {
-                    LazyImage(url: url) { state in
-                        if let image = state.image {
-                            image
-                                .resizable()
-                                .scaledToFill()
-                        } else {
-                            Image(systemName: "person.fill")
-                                .font(.system(size: size * 0.45))
-                                .foregroundColor(Nf.textMute)
-                        }
-                    }
+                if let avatar {
+                    Image(uiImage: avatar).resizable().scaledToFill()
                 } else {
                     Image(systemName: "person.fill")
                         .font(.system(size: size * 0.45))
@@ -66,6 +62,24 @@ struct AvatarView: View {
             .frame(width: size, height: size)
             .clipped()
             .clipShape(Circle())
+            .task(id: requests) {
+                avatar = nil
+                let pipeline = ImagePipeline.shared
+                let images = requests.map { ImageRequest(urlRequest: $0) }
+                for request in images {
+                    if let cached = pipeline.cache[request]?.image {
+                        avatar = cached
+                        return
+                    }
+                }
+                for request in images {
+                    guard !Task.isCancelled else { return }
+                    if let image = try? await pipeline.image(for: request), !Task.isCancelled {
+                        avatar = image
+                        return
+                    }
+                }
+            }
     }
 }
 

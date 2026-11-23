@@ -338,7 +338,7 @@ struct CatalogScreen: View {
 
                 if vm.hasActiveFilters {
                     Button {
-                        vm.resetFilters(using: app.a365)
+                        vm.resetFilters()
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "xmark")
