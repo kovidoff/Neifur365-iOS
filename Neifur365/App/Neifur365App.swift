@@ -1,11 +1,30 @@
 import SwiftUI
+import UIKit
+
+@MainActor
+final class NeifurAppDelegate: NSObject, UIApplicationDelegate {
+    let container = AppContainer()
+
+    func application(
+        _ application: UIApplication,
+        handleEventsForBackgroundURLSession identifier: String,
+        completionHandler: @escaping () -> Void
+    ) {
+        guard identifier == DownloadManager.sessionIdentifier else {
+            completionHandler()
+            return
+        }
+        container.downloads.handleBackgroundEvents(completionHandler: completionHandler)
+    }
+}
 
 @main
 struct Neifur365App: App {
-    @StateObject private var container = AppContainer()
+    @UIApplicationDelegateAdaptor(NeifurAppDelegate.self) private var appDelegate
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
+        let container = appDelegate.container
         WindowGroup {
             RootView()
                 .environmentObject(container)
@@ -15,6 +34,9 @@ struct Neifur365App: App {
                 .environmentObject(container.downloads)
                 .preferredColorScheme(.dark)
                 .tint(Nf.violet)
+                .onAppear {
+                    container.downloads.restoreTasks()
+                }
         }
         .onChange(of: scenePhase) { phase in
             if phase == .background {

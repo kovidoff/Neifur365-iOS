@@ -894,8 +894,10 @@ struct AnimePreviewScreen: View {
         guard let series = currentSeries else { return }
         Task {
             do {
-                try await downloads.enqueue(series: series, episode: ep, studio: selectedStudio)
-                showToast("Скачивается \(ep.label)")
+                let started = try await downloads.enqueue(series: series, episode: ep, studio: selectedStudio)
+                if started {
+                    showToast("Скачивается \(ep.label)")
+                }
             } catch {
                 showToast(error.userMessage)
             }
@@ -914,7 +916,7 @@ struct AnimePreviewScreen: View {
             if started > 0 {
                 showToast("Добавлено в загрузки: \(started) \(ListProgress.plural(started))")
             } else {
-                showToast("Эти серии уже скачаны или загружаются")
+                showToast("Нет новых загрузок. Проверь состояние серий в карточке.")
             }
         }
     }

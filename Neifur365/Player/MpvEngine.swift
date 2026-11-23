@@ -76,7 +76,7 @@ final class MpvEngine: ObservableObject {
     @Published var isEnded: Bool = false
     @Published var playbackError: String?
 
-    var onEnded: (() -> Void)?
+    var onEnded: (@MainActor () -> Void)?
     var onNextCommand: (() -> Void)?
     var onPreviousCommand: (() -> Void)?
 
@@ -84,6 +84,9 @@ final class MpvEngine: ObservableObject {
     private var mpv: OpaquePointer?
     private var attachedLayer: MpvMetalLayer?
     private var pendingLoad: PendingLoad?
+    private var loadID = UUID()
+    private var queuedLoadID: UUID?
+    private var acceptsPlaybackEvents = false
     private var isShutdown = false
     private let userAgent: String
     private var currentTitle = ""
@@ -91,10 +94,10 @@ final class MpvEngine: ObservableObject {
     private var currentSubScale: Double = 1.0
 
     private struct PendingLoad {
+        let id: UUID
         let url: String
         let startSeconds: Double
         let subtitleFile: URL?
-        let cookieHeader: String?
     }
 
     init(userAgent: String) {
@@ -178,29 +181,44 @@ final class MpvEngine: ObservableObject {
         }, rawSelf)
     }
 
+    @MainActor
+    func prepareForLoad(startSeconds: Double = 0) {
+        loadID = UUID()
+        isBuffering = true
+        isEnded = false
+        isPaused = false
+        playbackError = nil
+        position = startSeconds
+        duration = 0
+        cacheTime = 0
+
+        queue.async { [weak self] in
+            guard let self, !self.isShutdown else { return }
+            self.queuedLoadID = nil
+            self.acceptsPlaybackEvents = false
+            self.pendingLoad = nil
+            self.pendingSubtitleFile = nil
+            self.command(["stop"])
+        }
+    }
+
+    @MainActor
     func load(
         url: String,
         startSeconds: Double = 0,
         subtitleFile: URL? = nil,
-        cookieHeader: String? = nil,
         title: String = "",
         subtitle: String = ""
     ) {
+        prepareForLoad(startSeconds: startSeconds)
         currentTitle = title
         currentSubtitle = subtitle
-        DispatchQueue.main.async {
-            self.isBuffering = true
-            self.isEnded = false
-            self.playbackError = nil
-            self.position = startSeconds
-            self.duration = 0
-        }
 
         let req = PendingLoad(
+            id: loadID,
             url: url,
             startSeconds: max(0, startSeconds),
-            subtitleFile: subtitleFile,
-            cookieHeader: cookieHeader
+            subtitleFile: subtitleFile
         )
 
         queue.async { [weak self] in
@@ -214,33 +232,31 @@ final class MpvEngine: ObservableObject {
     }
 
     private func performLoad(_ req: PendingLoad) {
-        if let cookie = req.cookieHeader, !cookie.isEmpty {
-            setProperty("http-header-fields", "Cookie: \(cookie)")
-        } else {
-            setProperty("http-header-fields", "")
-        }
+        readEvents()
+        queuedLoadID = req.id
+        pendingSubtitleFile = req.subtitleFile
 
         var options: [String] = []
         if req.startSeconds > 2 {
             options.append("start=\(Int(req.startSeconds))")
         }
 
-        if options.isEmpty {
-            command(["loadfile", req.url, "replace"])
-        } else {
-            command(["loadfile", req.url, "replace", "-1", options.joined(separator: ",")])
+        var args = ["loadfile", req.url, "replace"]
+        if !options.isEmpty {
+            args.append(contentsOf: ["-1", options.joined(separator: ",")])
         }
-
-        if let sub = req.subtitleFile {
-            // Queue subtitle load slightly after file open starts; also re-apply on file-loaded.
-            pendingSubtitleFile = sub
-        } else {
-            pendingSubtitleFile = nil
-            command(["sub-remove"])
+        let result = command(args)
+        if result < 0 {
+            let message = String(cString: mpv_error_string(result))
+            publishPlayback {
+                $0.isBuffering = false
+                $0.playbackError = "Не удалось открыть видео (\(message))"
+            }
+            return
         }
 
         setFlag("pause", false)
-        DispatchQueue.main.async { self.updateNowPlaying() }
+        publishPlayback { $0.updateNowPlaying() }
     }
 
     private var pendingSubtitleFile: URL?
@@ -318,32 +334,48 @@ final class MpvEngine: ObservableObject {
     // MARK: - Event Loop
 
     private func drainEvents() {
-        queue.async { [weak self] in
-            guard let self, !self.isShutdown, let ctx = self.mpv else { return }
-            while let eventPtr = mpv_wait_event(ctx, 0) {
-                let event = eventPtr.pointee
-                if event.event_id == MPV_EVENT_NONE { break }
-                self.handle(event: event)
-            }
+        queue.async { [weak self] in self?.readEvents() }
+    }
+
+    private func readEvents() {
+        guard !isShutdown, let ctx = mpv else { return }
+        while let eventPtr = mpv_wait_event(ctx, 0) {
+            let event = eventPtr.pointee
+            if event.event_id == MPV_EVENT_NONE { break }
+            handle(event: event)
+        }
+    }
+
+    private func publishPlayback(_ update: @escaping @MainActor (MpvEngine) -> Void) {
+        guard let id = queuedLoadID else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.loadID == id else { return }
+            update(self)
         }
     }
 
     private func handle(event: mpv_event) {
+        guard queuedLoadID != nil else { return }
+        if event.event_id == MPV_EVENT_START_FILE {
+            acceptsPlaybackEvents = true
+        }
+        guard acceptsPlaybackEvents else { return }
+
         switch event.event_id {
         case MPV_EVENT_FILE_LOADED:
             if let sub = pendingSubtitleFile {
                 command(["sub-add", sub.path, "select"])
             }
-            DispatchQueue.main.async {
-                self.isBuffering = false
-                self.playbackError = nil
-                self.updateNowPlaying()
+            publishPlayback {
+                $0.isBuffering = false
+                $0.playbackError = nil
+                $0.updateNowPlaying()
             }
 
         case MPV_EVENT_START_FILE:
-            DispatchQueue.main.async {
-                self.isBuffering = true
-                self.isEnded = false
+            publishPlayback {
+                $0.isBuffering = true
+                $0.isEnded = false
             }
 
         case MPV_EVENT_END_FILE:
@@ -351,9 +383,9 @@ final class MpvEngine: ObservableObject {
                 let end = data.assumingMemoryBound(to: mpv_event_end_file.self).pointee
                 if end.reason == MPV_END_FILE_REASON_ERROR {
                     let msg = String(cString: mpv_error_string(end.error))
-                    DispatchQueue.main.async {
-                        self.isBuffering = false
-                        self.playbackError = "Ошибка воспроизведения (\(msg))"
+                    publishPlayback {
+                        $0.isBuffering = false
+                        $0.playbackError = "Ошибка воспроизведения (\(msg))"
                     }
                 }
             }
@@ -368,44 +400,42 @@ final class MpvEngine: ObservableObject {
             case "time-pos":
                 if prop.format == MPV_FORMAT_DOUBLE, let valPtr = prop.data {
                     let val = valPtr.assumingMemoryBound(to: Double.self).pointee
-                    DispatchQueue.main.async {
-                        self.position = val
-                    }
+                    publishPlayback { $0.position = val }
                 }
             case "duration":
                 if prop.format == MPV_FORMAT_DOUBLE, let valPtr = prop.data {
                     let val = valPtr.assumingMemoryBound(to: Double.self).pointee
-                    DispatchQueue.main.async {
-                        self.duration = val
-                        self.updateNowPlaying()
+                    publishPlayback {
+                        $0.duration = val
+                        $0.updateNowPlaying()
                     }
                 }
             case "demuxer-cache-time":
                 if prop.format == MPV_FORMAT_DOUBLE, let valPtr = prop.data {
                     let val = valPtr.assumingMemoryBound(to: Double.self).pointee
-                    DispatchQueue.main.async { self.cacheTime = val }
+                    publishPlayback { $0.cacheTime = val }
                 }
             case "pause":
                 if prop.format == MPV_FORMAT_FLAG, let valPtr = prop.data {
                     let paused = valPtr.assumingMemoryBound(to: Int32.self).pointee != 0
-                    DispatchQueue.main.async {
-                        self.isPaused = paused
-                        self.updateNowPlaying()
+                    publishPlayback {
+                        $0.isPaused = paused
+                        $0.updateNowPlaying()
                     }
                 }
             case "paused-for-cache":
                 if prop.format == MPV_FORMAT_FLAG, let valPtr = prop.data {
                     let buffering = valPtr.assumingMemoryBound(to: Int32.self).pointee != 0
-                    DispatchQueue.main.async { self.isBuffering = buffering }
+                    publishPlayback { $0.isBuffering = buffering }
                 }
             case "eof-reached":
                 if prop.format == MPV_FORMAT_FLAG, let valPtr = prop.data {
                     let reached = valPtr.assumingMemoryBound(to: Int32.self).pointee != 0
                     if reached {
-                        DispatchQueue.main.async {
-                            if !self.isEnded {
-                                self.isEnded = true
-                                self.onEnded?()
+                        publishPlayback {
+                            if !$0.isEnded {
+                                $0.isEnded = true
+                                $0.onEnded?()
                             }
                         }
                     }
@@ -443,14 +473,15 @@ final class MpvEngine: ObservableObject {
         mpv_set_property(ctx, name, MPV_FORMAT_DOUBLE, &v)
     }
 
-    private func command(_ args: [String]) {
-        guard let ctx = mpv else { return }
+    @discardableResult
+    private func command(_ args: [String]) -> Int32 {
+        guard let ctx = mpv else { return 0 }
         var cStrings: [UnsafeMutablePointer<CChar>?] = args.map { strdup($0) }
         cStrings.append(nil)
         defer { cStrings.forEach { if let p = $0 { free(p) } } }
         var ptrs: [UnsafePointer<CChar>?] = cStrings.map { $0.map { UnsafePointer($0) } }
-        ptrs.withUnsafeMutableBufferPointer { buf in
-            _ = mpv_command(ctx, buf.baseAddress)
+        return ptrs.withUnsafeMutableBufferPointer { buf in
+            mpv_command(ctx, buf.baseAddress)
         }
     }
 

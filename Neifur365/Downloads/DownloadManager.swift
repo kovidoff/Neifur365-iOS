@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 enum DownloadStatus: String, Codable, Hashable {
@@ -26,9 +27,15 @@ struct DownloadedEpisode: Codable, Hashable, Identifiable {
     var subtitleFileName: String?
     var errorMessage: String?
     var addedAt: Date
+    var transferId: UUID?
 
     var id: Int64 { episodeId }
     var isReady: Bool { status == .completed && videoFileName != nil }
+    var isActive: Bool { status == .queued || status == .downloading }
+
+    fileprivate var taskDescription: String {
+        transferId.map { "\(episodeId):\($0.uuidString)" } ?? String(episodeId)
+    }
 
     func toEpisode() -> Episode {
         Episode(
@@ -62,6 +69,8 @@ func formatBytes(_ bytes: Int64) -> String {
 
 @MainActor
 final class DownloadManager: NSObject, ObservableObject {
+    static let sessionIdentifier = "app.neifur365.ios.downloads"
+
     @Published private(set) var items: [DownloadedEpisode] = []
 
     private let api: Anime365Client
@@ -70,9 +79,18 @@ final class DownloadManager: NSObject, ObservableObject {
     private let downloadsDir: URL
     private let indexUrl: URL
 
-    private var bgSession: URLSession!
+    // Main-queue delivery keeps the file move, index update and system completion ordered.
+    private lazy var bgSession: URLSession = {
+        let cfg = URLSessionConfiguration.background(withIdentifier: Self.sessionIdentifier)
+        cfg.isDiscretionary = false
+        cfg.sessionSendsLaunchEvents = true
+        cfg.httpAdditionalHeaders = ["User-Agent": api.userAgent]
+        return URLSession(configuration: cfg, delegate: self, delegateQueue: .main)
+    }()
     private var activeTasks: [Int64: URLSessionDownloadTask] = [:]
-    private var episodeIdByTaskId: [Int: Int64] = [:]
+    private var pendingRequests: [Int64: UUID] = [:]
+    private var didRestoreTasks = false
+    private var backgroundCompletion: (() -> Void)?
 
     var byAnime: [DownloadedAnime] {
         let grouped = Dictionary(grouping: items, by: \.animeId)
@@ -97,7 +115,7 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     var activeCount: Int {
-        items.filter { $0.status == .downloading || $0.status == .queued }.count
+        items.filter(\.isActive).count
     }
 
     init(api: Anime365Client, prefs: Prefs) {
@@ -117,13 +135,44 @@ final class DownloadManager: NSObject, ObservableObject {
         var mutableDir = downloadsDir
         try? mutableDir.setResourceValues(resourceValues)
 
-        let cfg = URLSessionConfiguration.background(withIdentifier: "app.neifur365.ios.downloads")
-        cfg.isDiscretionary = false
-        cfg.sessionSendsLaunchEvents = true
-        cfg.httpAdditionalHeaders = ["User-Agent": api.userAgent]
-        self.bgSession = URLSession(configuration: cfg, delegate: self, delegateQueue: nil)
-
         loadIndex()
+    }
+
+    func handleBackgroundEvents(completionHandler: @escaping () -> Void) {
+        backgroundCompletion = completionHandler
+        restoreTasks()
+    }
+
+    func restoreTasks() {
+        guard !didRestoreTasks else { return }
+        didRestoreTasks = true
+        let savedTransfers = Set(items.filter(\.isActive).map(\.taskDescription))
+        bgSession.getAllTasks { [weak self] tasks in
+            DispatchQueue.main.async {
+                self?.restoreTasks(tasks, savedTransfers: savedTransfers)
+            }
+        }
+    }
+
+    private func restoreTasks(_ tasks: [URLSessionTask], savedTransfers: Set<String>) {
+        for case let task as URLSessionDownloadTask in tasks {
+            guard let index = index(for: task), items[index].isActive else {
+                task.cancel()
+                continue
+            }
+            activeTasks[items[index].episodeId] = task
+            if task.state == .suspended {
+                task.resume()
+            }
+        }
+        for index in items.indices where items[index].isActive {
+            let item = items[index]
+            if savedTransfers.contains(item.taskDescription), activeTasks[item.episodeId] == nil {
+                items[index].status = .failed
+                items[index].errorMessage = "Загрузка прервана. Запусти её заново из карточки аниме."
+            }
+        }
+        saveIndex()
     }
 
     func item(forEpisodeId id: Int64) -> DownloadedEpisode? {
@@ -143,16 +192,25 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     /// Queues one episode for background download (resolving embed URL + downloading .ass subtitles if present).
+    @discardableResult
     func enqueue(
         series: Series,
         episode: Episode,
         studio: Studio?,
         fallbackTranslation: Translation? = nil
-    ) async throws {
-        if let existing = item(forEpisodeId: episode.id),
-           existing.status == .completed || existing.status == .downloading {
-            return
+    ) async throws -> Bool {
+        let id = episode.id
+        guard pendingRequests[id] == nil,
+              item(forEpisodeId: id)?.isActive != true,
+              item(forEpisodeId: id)?.isReady != true else { return false }
+        let transferId = UUID()
+        pendingRequests[id] = transferId
+        defer {
+            if pendingRequests[id] == transferId {
+                pendingRequests.removeValue(forKey: id)
+            }
         }
+        restoreTasks()
 
         let targetQuality = prefs.downloadQuality
         let translation: Translation
@@ -176,27 +234,36 @@ final class DownloadManager: NSObject, ObservableObject {
         }
 
         let embed = try await api.embed(translationId: translation.id)
-        let sortedStreams = embed.stream.sorted { a, b in
-            let aFit = a.height <= targetQuality ? 1 : 0
-            let bFit = b.height <= targetQuality ? 1 : 0
-            if aFit != bFit { return aFit > bFit }
-            return a.height > b.height
-        }
-        guard let stream = sortedStreams.first(where: { !$0.urls.isEmpty }),
+        let sortedStreams = embed.stream
+            .filter { !$0.urls.isEmpty }
+            .sorted { $0.height > $1.height }
+        guard let stream = sortedStreams.first(where: { $0.height <= targetQuality }) ?? sortedStreams.last,
               let rawUrl = stream.urls.first,
-              let videoUrl = URL(string: rawUrl) else {
+              let videoUrl = URL(string: rawUrl),
+              ["https", "http"].contains(videoUrl.scheme?.lowercased() ?? ""), videoUrl.host != nil else {
             throw ApiError("Anime 365 не выдал ссылку на видео для скачивания")
         }
+        guard videoUrl.pathExtension.lowercased() != "m3u8" else {
+            throw ApiError("Эта версия серии доступна только для просмотра онлайн")
+        }
 
-        var subFileName: String? = nil
+        var subtitle: (name: String, data: Data)?
         if let subUrl = embed.subtitlesUrl ?? embed.subtitlesVttUrl, !subUrl.isEmpty {
             if let subContent = try? await api.subtitles(url: subUrl), !subContent.isEmpty {
                 let ext = subUrl.lowercased().contains("vtt") ? "vtt" : "ass"
-                let name = "ep_\(episode.id).\(ext)"
-                let dest = downloadsDir.appendingPathComponent(name)
-                try? subContent.data(using: .utf8)?.write(to: dest, options: .atomic)
-                subFileName = name
+                subtitle = ("ep_\(id)_\(transferId.uuidString).\(ext)", Data(subContent.utf8))
             }
+        }
+        try Task.checkCancellation()
+        guard pendingRequests[id] == transferId,
+              item(forEpisodeId: id)?.isReady != true,
+              item(forEpisodeId: id)?.isActive != true else { return false }
+
+        var subFileName: String?
+        if let subtitle, (try? subtitle.data.write(
+            to: downloadsDir.appendingPathComponent(subtitle.name), options: .atomic
+        )) != nil {
+            subFileName = subtitle.name
         }
 
         let record = DownloadedEpisode(
@@ -217,27 +284,29 @@ final class DownloadManager: NSObject, ObservableObject {
             videoFileName: nil,
             subtitleFileName: subFileName,
             errorMessage: nil,
-            addedAt: Date()
+            addedAt: Date(),
+            transferId: transferId
         )
-        upsert(record)
+        do {
+            try persistNewTransfer(record)
+        } catch {
+            removeFile(named: subFileName)
+            throw error
+        }
 
         var req = URLRequest(url: videoUrl)
         req.setValue(api.userAgent, forHTTPHeaderField: "User-Agent")
         let task = bgSession.downloadTask(with: req)
-        task.taskDescription = String(episode.id)
-        activeTasks[episode.id] = task
-        episodeIdByTaskId[task.taskIdentifier] = episode.id
+        task.taskDescription = record.taskDescription
+        activeTasks[id] = task
         task.resume()
+        return true
     }
 
     func enqueueBatch(series: Series, episodes: [Episode], studio: Studio?, count: Int = 3) async -> Int {
         var started = 0
         for ep in episodes.prefix(count) {
-            if let existing = item(forEpisodeId: ep.id),
-               existing.status == .completed || existing.status == .downloading {
-                continue
-            }
-            if (try? await enqueue(series: series, episode: ep, studio: studio)) != nil {
+            if (try? await enqueue(series: series, episode: ep, studio: studio)) == true {
                 started += 1
             }
         }
@@ -245,20 +314,15 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     func cancelOrDelete(episodeId: Int64) {
-        if let task = activeTasks.removeValue(forKey: episodeId) {
-            episodeIdByTaskId.removeValue(forKey: task.taskIdentifier)
-            task.cancel()
-        }
+        pendingRequests.removeValue(forKey: episodeId)
+        activeTasks.removeValue(forKey: episodeId)?.cancel()
         if let item = item(forEpisodeId: episodeId) {
-            if let vf = item.videoFileName {
-                try? fm.removeItem(at: downloadsDir.appendingPathComponent(vf))
-            }
-            if let sf = item.subtitleFileName {
-                try? fm.removeItem(at: downloadsDir.appendingPathComponent(sf))
-            }
+            removeFile(named: item.videoFileName)
+            removeFile(named: item.subtitleFileName)
         }
         items.removeAll { $0.episodeId == episodeId }
         saveIndex()
+        restoreTasks()
     }
 
     func deleteAnime(animeId: Int64) {
@@ -276,13 +340,28 @@ final class DownloadManager: NSObject, ObservableObject {
         cancelOrDelete(episodeId: episodeId)
     }
 
-    private func upsert(_ record: DownloadedEpisode) {
-        if let idx = items.firstIndex(where: { $0.episodeId == record.episodeId }) {
-            items[idx] = record
+    private func persistNewTransfer(_ record: DownloadedEpisode) throws {
+        var updated = items
+        let previous = item(forEpisodeId: record.episodeId)
+        if let idx = updated.firstIndex(where: { $0.episodeId == record.episodeId }) {
+            updated[idx] = record
         } else {
-            items.insert(record, at: 0)
+            updated.insert(record, at: 0)
         }
-        saveIndex()
+        try JSONEncoder().encode(updated).write(to: indexUrl, options: .atomic)
+        items = updated
+        removeFile(named: previous?.subtitleFileName)
+        removeFile(named: previous?.videoFileName)
+    }
+
+    private func removeFile(named name: String?) {
+        guard let name else { return }
+        try? fm.removeItem(at: downloadsDir.appendingPathComponent(name))
+    }
+
+    private func index(for task: URLSessionTask) -> Int? {
+        guard let description = task.taskDescription else { return nil }
+        return items.firstIndex { $0.taskDescription == description && $0.status != .completed }
     }
 
     private func loadIndex() {
@@ -318,15 +397,16 @@ extension DownloadManager: URLSessionDownloadDelegate {
         totalBytesWritten: Int64,
         totalBytesExpectedToWrite: Int64
     ) {
-        let epId = downloadTask.taskDescription.flatMap(Int64.init)
-        Task { @MainActor [weak self] in
-            guard let self, let id = epId ?? self.episodeIdByTaskId[downloadTask.taskIdentifier],
-                  let idx = self.items.firstIndex(where: { $0.episodeId == id }) else { return }
-            self.items[idx].status = .downloading
-            self.items[idx].bytesDownloaded = totalBytesWritten
+        MainActor.assumeIsolated {
+            guard let index = self.index(for: downloadTask) else { return }
+            let id = items[index].episodeId
+            activeTasks[id] = downloadTask
+            items[index].status = .downloading
+            items[index].errorMessage = nil
+            items[index].bytesDownloaded = totalBytesWritten
             if totalBytesExpectedToWrite > 0 {
-                self.items[idx].totalBytes = totalBytesExpectedToWrite
-                self.items[idx].progress = min(max(Double(totalBytesWritten) / Double(totalBytesExpectedToWrite), 0), 1)
+                items[index].totalBytes = totalBytesExpectedToWrite
+                items[index].progress = min(max(Double(totalBytesWritten) / Double(totalBytesExpectedToWrite), 0), 1)
             }
         }
     }
@@ -336,57 +416,69 @@ extension DownloadManager: URLSessionDownloadDelegate {
         downloadTask: URLSessionDownloadTask,
         didFinishDownloadingTo location: URL
     ) {
-        let epId = downloadTask.taskDescription.flatMap(Int64.init)
-        guard let epId else { return }
-        let fileName = "ep_\(epId).mp4"
-        let dest = downloadsDir.appendingPathComponent(fileName)
-        let fm = FileManager.default
-        try? fm.removeItem(at: dest)
-        var moveError: String? = nil
-        var finalSize: Int64 = 0
-        do {
-            try fm.moveItem(at: location, to: dest)
-            if let attrs = try? fm.attributesOfItem(atPath: dest.path),
-               let size = attrs[.size] as? NSNumber {
-                finalSize = size.int64Value
-            }
-        } catch {
-            moveError = error.localizedDescription
+        MainActor.assumeIsolated {
+            finishDownload(downloadTask, at: location)
         }
+    }
 
-        Task { @MainActor [weak self] in
-            guard let self, let idx = self.items.firstIndex(where: { $0.episodeId == epId }) else { return }
-            self.activeTasks.removeValue(forKey: epId)
-            self.episodeIdByTaskId.removeValue(forKey: downloadTask.taskIdentifier)
-            if let moveError {
-                self.items[idx].status = .failed
-                self.items[idx].errorMessage = moveError
-            } else {
-                self.items[idx].status = .completed
-                self.items[idx].progress = 1.0
-                self.items[idx].videoFileName = fileName
-                if finalSize > 0 {
-                    self.items[idx].bytesDownloaded = finalSize
-                    self.items[idx].totalBytes = finalSize
-                }
-                self.items[idx].errorMessage = nil
+    private func finishDownload(_ task: URLSessionDownloadTask, at location: URL) {
+        guard let index = index(for: task) else { return }
+        var record = items[index]
+        activeTasks.removeValue(forKey: record.episodeId)
+
+        do {
+            guard let response = task.response as? HTTPURLResponse else {
+                throw ApiError("Сервер не вернул видео")
             }
-            self.saveIndex()
+            guard (200...299).contains(response.statusCode) else {
+                throw ApiError("Сервер не отдал видео (HTTP \(response.statusCode))")
+            }
+            let mime = response.mimeType?.lowercased() ?? ""
+            guard !mime.hasPrefix("text/"), !mime.contains("json"), !mime.contains("mpegurl") else {
+                throw ApiError("Сервер вернул страницу или плейлист вместо видеофайла")
+            }
+            let attributes = try fm.attributesOfItem(atPath: location.path)
+            guard let size = (attributes[.size] as? NSNumber)?.int64Value, size > 0 else {
+                throw ApiError("Сервер вернул пустой файл")
+            }
+            let fileName = record.transferId.map { "ep_\(record.episodeId)_\($0.uuidString).mp4" }
+                ?? "ep_\(record.episodeId).mp4"
+            let destination = downloadsDir.appendingPathComponent(fileName)
+            if fm.fileExists(atPath: destination.path) {
+                _ = try fm.replaceItemAt(destination, withItemAt: location)
+            } else {
+                try fm.moveItem(at: location, to: destination)
+            }
+            record.status = .completed
+            record.progress = 1
+            record.videoFileName = fileName
+            record.bytesDownloaded = size
+            record.totalBytes = size
+            record.errorMessage = nil
+        } catch {
+            record.status = .failed
+            record.errorMessage = error.userMessage
         }
+        items[index] = record
+        saveIndex()
     }
 
     nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let error else { return }
-        if (error as NSError).code == NSURLErrorCancelled { return }
-        let epId = task.taskDescription.flatMap(Int64.init)
-        Task { @MainActor [weak self] in
-            guard let self, let id = epId ?? self.episodeIdByTaskId[task.taskIdentifier],
-                  let idx = self.items.firstIndex(where: { $0.episodeId == id }) else { return }
-            self.activeTasks.removeValue(forKey: id)
-            self.episodeIdByTaskId.removeValue(forKey: task.taskIdentifier)
-            self.items[idx].status = .failed
-            self.items[idx].errorMessage = error.userMessage
-            self.saveIndex()
+        MainActor.assumeIsolated {
+            guard let index = index(for: task) else { return }
+            activeTasks.removeValue(forKey: items[index].episodeId)
+            items[index].status = .failed
+            items[index].errorMessage = error.userMessage
+            saveIndex()
+        }
+    }
+
+    nonisolated func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
+        MainActor.assumeIsolated {
+            let completion = backgroundCompletion
+            backgroundCompletion = nil
+            completion?()
         }
     }
 }

@@ -77,21 +77,22 @@ struct PlayerScreen: View {
                     .transition(.opacity)
                 }
 
-                if vm.loadingStream || vm.engine.isBuffering {
-                    ProgressView()
-                        .tint(.white)
-                        .scaleEffect(1.3)
-                        .padding(18)
-                        .background(.ultraThinMaterial, in: Circle())
-                }
-
                 if let err = vm.errorMessage ?? vm.engine.playbackError {
                     errorOverlay(err)
-                } else if showControls {
-                    if isLocked {
-                        lockedOverlay
-                    } else {
-                        controlsOverlay
+                } else {
+                    if vm.loadingStream || vm.engine.isBuffering {
+                        ProgressView()
+                            .tint(.white)
+                            .scaleEffect(1.3)
+                            .padding(18)
+                            .background(.ultraThinMaterial, in: Circle())
+                    }
+                    if showControls {
+                        if isLocked {
+                            lockedOverlay
+                        } else {
+                            controlsOverlay
+                        }
                     }
                 }
             }

@@ -56,7 +56,6 @@ final class PlayerViewModel: ObservableObject {
     @Published var markedWatchedNotice: String?
 
     private let app: AppContainer
-    private var currentEmbed: Embed?
     private var currentPickKey: String?
     private var markedEpisodeIds = Set<Int64>()
     private var progressTimer: Task<Void, Never>?
@@ -86,7 +85,7 @@ final class PlayerViewModel: ObservableObject {
         self.engine.setSubtitleScale(app.prefs.subScale)
 
         self.engine.onEnded = { [weak self] in
-            Task { @MainActor in self?.handlePlaybackEnded() }
+            self?.handlePlaybackEnded()
         }
         self.engine.onNextCommand = { [weak self] in
             Task { @MainActor in self?.playNext() }
@@ -115,33 +114,36 @@ final class PlayerViewModel: ObservableObject {
         engine.shutdown()
     }
 
-    func loadCurrentEpisode(resumeFromSaved: Bool, preservePosition: Double? = nil) {
+    func loadCurrentEpisode(resumeFromSaved: Bool) {
         guard let episode = currentEpisode else { return }
         loadTask?.cancel()
         loadingStream = true
         errorMessage = nil
+        isOfflinePlayback = false
+        translations = []
+        currentTranslation = nil
+        availableQualities = []
+        hasSubtitles = false
+        lastSubtitleTempURL = nil
 
-        let startSec = preservePosition ?? (resumeFromSaved ? app.prefs.savedPosition(animeId: request.seriesId, episode: episode.number) : 0)
+        let startSec = resumeFromSaved ? app.prefs.savedPosition(animeId: request.seriesId, episode: episode.number) : 0
+        engine.prepareForLoad(startSeconds: startSec)
 
         loadTask = Task {
+            guard !Task.isCancelled else { return }
             // 1. Offline file first if already downloaded and ready
             if let offline = app.downloads.item(forEpisodeId: episode.id),
                offline.isReady,
                let videoUrl = app.downloads.videoURL(for: offline) {
                 let subUrl = app.downloads.subtitleURL(for: offline)
                 isOfflinePlayback = true
-                availableQualities = []
-                translations = []
-                currentTranslation = nil
                 selectedHeight = offline.qualityHeight
                 hasSubtitles = subUrl != nil
-                subtitlesVisible = true
                 loadingStream = false
                 engine.load(
                     url: videoUrl.absoluteString,
                     startSeconds: startSec,
                     subtitleFile: subUrl,
-                    cookieHeader: nil,
                     title: request.animeTitle,
                     subtitle: "\(episode.label) · \(offline.studioName) (офлайн)"
                 )
@@ -149,7 +151,6 @@ final class PlayerViewModel: ObservableObject {
             }
 
             // 2. Online stream via Anime 365
-            isOfflinePlayback = false
             do {
                 let fullEp = try await app.a365.episode(id: episode.id)
                 if Task.isCancelled { return }
@@ -184,8 +185,11 @@ final class PlayerViewModel: ObservableObject {
         currentTranslation = tr
         loadingStream = true
         errorMessage = nil
+        availableQualities = []
+        hasSubtitles = false
 
         loadTask?.cancel()
+        engine.prepareForLoad(startSeconds: resumePos)
         loadTask = Task {
             do {
                 try await openTranslation(tr, episode: episode, startSeconds: resumePos)
@@ -198,7 +202,7 @@ final class PlayerViewModel: ObservableObject {
     }
 
     func selectQuality(_ stream: EmbedStream) {
-        guard let episode = currentEpisode, let url = stream.urls.first else { return }
+        guard !loadingStream, let episode = currentEpisode, let url = stream.urls.first else { return }
         let resumePos = engine.position
         selectedHeight = stream.height
         app.prefs.quality = stream.height
@@ -207,7 +211,6 @@ final class PlayerViewModel: ObservableObject {
             url: url,
             startSeconds: resumePos,
             subtitleFile: subFile,
-            cookieHeader: app.a365.cookies.header(),
             title: request.animeTitle,
             subtitle: "\(episode.label) · \(currentTranslation?.author ?? "")"
         )
@@ -218,40 +221,38 @@ final class PlayerViewModel: ObservableObject {
     private func openTranslation(_ tr: Translation, episode: Episode, startSeconds: Double) async throws {
         let embed = try await app.a365.embed(translationId: tr.id)
         if Task.isCancelled { return }
-        currentEmbed = embed
 
         let sortedStreams = embed.stream
             .filter { !$0.urls.isEmpty }
             .sorted { $0.height > $1.height }
-        availableQualities = sortedStreams
 
         let targetQ = app.prefs.quality
         let bestStream = sortedStreams.first(where: { $0.height <= targetQ }) ?? sortedStreams.last
         guard let chosen = bestStream, let rawUrl = chosen.urls.first else {
             throw ApiError("Не удалось получить ссылку на видео")
         }
-        selectedHeight = chosen.height
-
         var subFile: URL? = nil
         if let subUrl = embed.subtitlesUrl ?? embed.subtitlesVttUrl, !subUrl.isEmpty {
-            if let text = try? await app.a365.subtitles(url: subUrl), !text.isEmpty {
+            if let text = try? await app.a365.subtitles(url: subUrl), !Task.isCancelled, !text.isEmpty {
                 let ext = subUrl.lowercased().contains("vtt") ? "vtt" : "ass"
                 let temp = FileManager.default.temporaryDirectory
                     .appendingPathComponent("neifur_sub_\(tr.id).\(ext)")
-                try? text.data(using: .utf8)?.write(to: temp, options: .atomic)
-                subFile = temp
+                if (try? Data(text.utf8).write(to: temp, options: .atomic)) != nil {
+                    subFile = temp
+                }
             }
         }
+        guard !Task.isCancelled else { return }
+        availableQualities = sortedStreams
+        selectedHeight = chosen.height
         lastSubtitleTempURL = subFile
         hasSubtitles = subFile != nil
-        subtitlesVisible = true
         loadingStream = false
 
         engine.load(
             url: rawUrl,
             startSeconds: startSeconds,
             subtitleFile: subFile,
-            cookieHeader: app.a365.cookies.header(),
             title: request.animeTitle,
             subtitle: "\(episode.label) · \(tr.author)"
         )
