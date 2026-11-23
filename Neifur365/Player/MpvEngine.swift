@@ -208,7 +208,10 @@ final class MpvEngine: ObservableObject {
         setOption("embeddedfonts", "yes")
         setOption("sub-scale", String(format: "%.2f", currentSubScale))
         if let fontsDir {
+            // libmpv disables config paths by default, including lookup of subfont.ttf.
+            setOption("config", "yes")
             setOption("config-dir", fontsDir.deletingLastPathComponent().path)
+            setOption("load-scripts", "no")
             setOption("sub-fonts-dir", fontsDir.path)
             setOption("sub-font", "Manrope")
         }
