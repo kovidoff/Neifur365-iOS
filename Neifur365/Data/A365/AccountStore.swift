@@ -47,8 +47,8 @@ final class AccountStore: ObservableObject {
         guard !checkingSession, isSignedIn else { return }
         checkingSession = true
         defer { checkingSession = false }
-        if let verified = try? await api.profile() {
-            if let verified {
+        do {
+            if let verified = try await api.profile() {
                 applySignedIn(verified)
             } else {
                 expired = true
@@ -56,6 +56,8 @@ final class AccountStore: ObservableObject {
                 state = .signedOut
                 prefs.saveProfile(nil)
             }
+        } catch {
+            // Network glitch while verifying session: keep current state.
         }
     }
 

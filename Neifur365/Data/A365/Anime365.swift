@@ -177,17 +177,15 @@ final class Anime365Client {
             return saved
         }
 
-        let task: Task<String, Error> = {
-            resolveLock.lock()
-            defer { resolveLock.unlock() }
+        let task: Task<String, Error> = resolveLock.withLock {
             if let existing = resolveTask, exclude == nil {
                 return existing
             }
             let created = Task<String, Error> {
                 defer {
-                    self.resolveLock.lock()
-                    self.resolveTask = nil
-                    self.resolveLock.unlock()
+                    self.resolveLock.withLock {
+                        self.resolveTask = nil
+                    }
                 }
                 let statuses = await self.probeAll()
                 let live = statuses.filter { $0.ok && $0.host != exclude }
@@ -206,7 +204,7 @@ final class Anime365Client {
             }
             resolveTask = created
             return created
-        }()
+        }
 
         return try await task.value
     }
@@ -417,17 +415,15 @@ final class Anime365Client {
 
     func series(id: Int64, force: Bool = false) async throws -> Series {
         if !force {
-            cacheLock.lock()
-            let hit = seriesCache[id]
-            cacheLock.unlock()
+            let hit = cacheLock.withLock { seriesCache[id] }
             if let hit, Date().timeIntervalSince(hit.0) < 300 {
                 return hit.1
             }
         }
         let fetched = try await api("/series/\(id)", as: Series.self)
-        cacheLock.lock()
-        seriesCache[id] = (Date(), fetched)
-        cacheLock.unlock()
+        cacheLock.withLock {
+            seriesCache[id] = (Date(), fetched)
+        }
         return fetched
     }
 
