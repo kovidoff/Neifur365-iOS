@@ -9,6 +9,8 @@ on:
 jobs:
   build:
     runs-on: macos-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -63,7 +65,8 @@ jobs:
           mkdir -p build/ipa/Payload
           cp -R build/DerivedData/Build/Products/Release-iphoneos/Neifur365.app build/ipa/Payload/
           cd build/ipa
-          zip -r -y ../Neifur365.ipa Payload
+          zip -r -y -q ../Neifur365.ipa Payload
+          unzip -t -q ../Neifur365.ipa
           ls -lh ../Neifur365.ipa
 
       - name: Upload Neifur365.ipa
@@ -71,4 +74,20 @@ jobs:
         with:
           name: Neifur365-unsigned-ipa
           path: build/Neifur365.ipa
+          compression-level: 0
           retention-days: 30
+
+      - name: Publish dev pre-release IPA
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view dev >/dev/null 2>&1; then
+            gh release upload dev build/Neifur365.ipa --clobber
+            gh release edit dev --notes "Автосборка из \`main\` (build #${{ github.run_number }}, commit \`${GITHUB_SHA::7}\`). Неподписанный IPA для Gbox / Feather / SideStore."
+          else
+            gh release create dev build/Neifur365.ipa \
+              --prerelease \
+              --title "Dev Build (latest)" \
+              --notes "Автосборка из \`main\` (build #${{ github.run_number }}, commit \`${GITHUB_SHA::7}\`). Неподписанный IPA для Gbox / Feather / SideStore."
+          fi
