@@ -1,0 +1,454 @@
+import SwiftUI
+
+struct LibraryScreen: View {
+    @EnvironmentObject private var app: AppContainer
+    @EnvironmentObject private var account: AccountStore
+    @EnvironmentObject private var lists: ListsStore
+    @EnvironmentObject private var prefs: Prefs
+
+    @State private var selectedStatus: ListStatus = .watching
+    @State private var searchQuery = ""
+    @State private var sort: ListSort = .default
+    @State private var editingTitle: ListedTitle?
+    @State private var showSignIn = false
+    @State private var showSettings = false
+    @State private var toastMessage: String?
+
+    private var displayedItems: [ListedTitle] {
+        lists.display(status: selectedStatus, history: prefs.history, query: searchQuery, sort: sort)
+    }
+
+    private var otherMatches: [(ListStatus, Int)] {
+        guard displayedItems.isEmpty && !searchQuery.trimmingCharacters(in: .whitespaces).isEmpty else { return [] }
+        return lists.matchesInOtherTabs(current: selectedStatus, query: searchQuery)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if !account.isSignedIn {
+                    signedOutState
+                } else if lists.loading && !lists.loaded {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                        Text("Загрузка списков…")
+                            .font(NfType.caption)
+                            .foregroundColor(Nf.textDim)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Nf.ink.ignoresSafeArea())
+                } else if let err = lists.error, !lists.loaded {
+                    VStack(spacing: 14) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.system(size: 36))
+                            .foregroundColor(Nf.amber)
+                        Text("Не удалось загрузить списки")
+                            .font(NfType.title)
+                            .foregroundColor(Nf.text)
+                        Text(err)
+                            .font(NfType.body)
+                            .foregroundColor(Nf.textDim)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 24)
+                        Button("Повторить") {
+                            lists.refresh()
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Nf.ink.ignoresSafeArea())
+                } else {
+                    signedInContent
+                }
+            }
+            .navigationTitle("Списки")
+            .navigationBarTitleDisplayMode(.large)
+            .searchable(text: $searchQuery, prompt: "Поиск в списке")
+            .toolbar {
+                if account.isSignedIn {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Menu {
+                            Picker("Сортировка", selection: $sort) {
+                                ForEach(ListSort.allCases) { option in
+                                    Text(option.rawValue).tag(option)
+                                }
+                            }
+                        } label: {
+                            Image(systemName: sort == .default ? "arrow.up.arrow.down.circle" : "arrow.up.arrow.down.circle.fill")
+                        }
+                        .accessibilityLabel("Сортировка")
+                    }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        showSettings = true
+                    } label: {
+                        Image(systemName: "gearshape")
+                    }
+                    .accessibilityLabel("Настройки")
+                }
+            }
+            .navigationDestination(for: AnimeRoute.self) { route in
+                AnimePreviewScreen(route: route)
+            }
+            .sheet(isPresented: $showSignIn) {
+                SignInSheet()
+            }
+            .sheet(isPresented: $showSettings) {
+                SettingsSheet()
+            }
+            .sheet(item: $editingTitle) { item in
+                ListEditorSheet(seriesId: item.entry.seriesId, title: item.displayTitle, series: item.series, current: item)
+            }
+            .overlay(alignment: .bottom) {
+                if let toastMessage {
+                    Text(toastMessage)
+                        .font(NfType.label)
+                        .foregroundColor(Nf.text)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .overlay(Capsule().stroke(Nf.line, lineWidth: 0.7))
+                        .padding(.bottom, 12)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .onAppear {
+                if account.isSignedIn {
+                    lists.refreshIfStale()
+                }
+            }
+        }
+    }
+
+    private var signedOutState: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "bookmark.circle")
+                .font(.system(size: 52))
+                .foregroundColor(Nf.violet)
+            Text(account.expired ? "Сессия истекла" : "Ваши списки Anime 365")
+                .font(NfType.display)
+                .foregroundColor(Nf.text)
+            Text("Войдите в аккаунт Anime 365, чтобы видеть «Смотрю», «Запланировано», отметки серий и новые выпуски онгоингов.")
+                .font(NfType.body)
+                .foregroundColor(Nf.textDim)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 28)
+            Button {
+                showSignIn = true
+            } label: {
+                Text("Войти в Anime 365")
+                    .font(NfType.title)
+                    .padding(.horizontal, 22)
+                    .padding(.vertical, 10)
+            }
+            .buttonStyle(.borderedProminent)
+            .padding(.top, 4)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Nf.ink.ignoresSafeArea())
+    }
+
+    private var signedInContent: some View {
+        VStack(spacing: 0) {
+            statusBar
+
+            if displayedItems.isEmpty {
+                emptyListView
+            } else if selectedStatus == .planned || selectedStatus == .completed {
+                posterGridView
+            } else {
+                progressListView
+            }
+        }
+        .background(Nf.ink.ignoresSafeArea())
+    }
+
+    private var statusBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(ListStatus.allCases) { st in
+                    let active = selectedStatus == st
+                    let count = lists.count(st)
+                    Button {
+                        withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                            selectedStatus = st
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text(st.title)
+                                .font(NfType.label)
+                            if count > 0 {
+                                Text("\(count)")
+                                    .font(NfType.caption)
+                                    .foregroundColor(active ? Nf.ink.opacity(0.8) : Nf.textMute)
+                                    .monospacedDigit()
+                            }
+                        }
+                        .foregroundColor(active ? Nf.ink : Nf.textDim)
+                        .padding(.horizontal, 13)
+                        .padding(.vertical, 8)
+                        .background(active ? st.tintColor : Nf.surfaceHi, in: Capsule())
+                    }
+                    .buttonStyle(NfPressableStyle())
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+        }
+    }
+
+    private var progressListView: some View {
+        List {
+            ForEach(displayedItems) { item in
+                NavigationLink(value: AnimeRoute(listed: item)) {
+                    ListedProgressRow(item: item) {
+                        bumpItem(item)
+                    }
+                }
+                .listRowBackground(Nf.surface)
+                .listRowSeparatorTint(Nf.line)
+                .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                    if item.status != .completed {
+                        Button {
+                            markCompleted(item)
+                        } label: {
+                            Label("Просмотрено", systemImage: "checkmark.circle.fill")
+                        }
+                        .tint(Nf.mint)
+                    }
+                }
+                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                    Button(role: .destructive) {
+                        removeItem(item)
+                    } label: {
+                        Label("Убрать", systemImage: "trash")
+                    }
+                    Button {
+                        editingTitle = item
+                    } label: {
+                        Label("Изменить", systemImage: "slider.horizontal.3")
+                    }
+                    .tint(Nf.violet)
+                }
+                .contextMenu { itemContextMenu(item) }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .scrollContentBackground(.hidden)
+        .refreshable {
+            lists.refresh()
+        }
+    }
+
+    private var posterGridView: some View {
+        let columns = [GridItem(.adaptive(minimum: 108, maximum: 140), spacing: 12)]
+        return ScrollView {
+            LazyVGrid(columns: columns, alignment: .leading, spacing: 16) {
+                ForEach(displayedItems) { item in
+                    NavigationLink(value: AnimeRoute(listed: item)) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ZStack(alignment: .topLeading) {
+                                PosterView(urlString: item.posterUrl, cornerRadius: 14)
+                                    .aspectRatio(2.0 / 3.0, contentMode: .fit)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                            .stroke(Nf.line.opacity(0.6), lineWidth: 0.5)
+                                    )
+                                if let score = item.entry.score {
+                                    HStack(spacing: 2) {
+                                        Image(systemName: "star.fill")
+                                            .font(.system(size: 9))
+                                            .foregroundColor(Nf.amber)
+                                        Text("\(score)")
+                                            .font(.system(size: 11, weight: .bold))
+                                            .foregroundColor(Nf.text)
+                                    }
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 3)
+                                    .background(.ultraThinMaterial, in: Capsule())
+                                    .padding(6)
+                                }
+                            }
+                            Text(item.displayTitle)
+                                .font(NfType.label)
+                                .foregroundColor(Nf.text)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.leading)
+                            let progress = ListProgress.line(item)
+                            if !progress.isEmpty {
+                                Text(progress)
+                                    .font(NfType.caption)
+                                    .foregroundColor(Nf.textMute)
+                                    .lineLimit(1)
+                            }
+                        }
+                    }
+                    .buttonStyle(NfPressableStyle())
+                    .contextMenu { itemContextMenu(item) }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+        }
+        .refreshable {
+            lists.refresh()
+        }
+    }
+
+    private var emptyListView: some View {
+        VStack(spacing: 12) {
+            Image(systemName: searchQuery.isEmpty ? selectedStatus.systemImage : "magnifyingglass")
+                .font(.system(size: 36))
+                .foregroundColor(Nf.textMute)
+            Text(searchQuery.isEmpty ? "В разделе «\(selectedStatus.title)» пока пусто" : "Ничего не найдено")
+                .font(NfType.title)
+                .foregroundColor(Nf.text)
+
+            if !otherMatches.isEmpty {
+                VStack(spacing: 8) {
+                    Text("Найдено в других вкладках:")
+                        .font(NfType.caption)
+                        .foregroundColor(Nf.textDim)
+                    HStack(spacing: 8) {
+                        ForEach(otherMatches, id: \.0) { st, count in
+                            Button("\(st.title) (\(count))") {
+                                selectedStatus = st
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    }
+                }
+                .padding(.top, 4)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private func itemContextMenu(_ item: ListedTitle) -> some View {
+        Button {
+            editingTitle = item
+        } label: {
+            Label("Редактировать", systemImage: "slider.horizontal.3")
+        }
+        if item.status == .watching {
+            Button {
+                bumpItem(item)
+            } label: {
+                Label("+1 серия", systemImage: "plus.circle")
+            }
+        }
+        if item.status != .completed {
+            Button {
+                markCompleted(item)
+            } label: {
+                Label("В «Просмотрено»", systemImage: "checkmark.circle")
+            }
+        }
+        Button(role: .destructive) {
+            removeItem(item)
+        } label: {
+            Label("Убрать из списка", systemImage: "trash")
+        }
+    }
+
+    private func bumpItem(_ item: ListedTitle) {
+        Task {
+            let res = await lists.bump(seriesId: item.entry.seriesId)
+            if case .failure(let err) = res { showToast(err.userMessage) }
+        }
+    }
+
+    private func markCompleted(_ item: ListedTitle) {
+        Task {
+            let nextWatched = item.total ?? item.aired ?? item.entry.watched
+            let res = await lists.set(
+                seriesId: item.entry.seriesId,
+                status: .completed,
+                watched: nextWatched,
+                score: item.entry.score,
+                series: item.series
+            )
+            switch res {
+            case .success: showToast("Перенесено в «Просмотрено»")
+            case .failure(let err): showToast(err.userMessage)
+            }
+        }
+    }
+
+    private func removeItem(_ item: ListedTitle) {
+        Task {
+            let res = await lists.set(seriesId: item.entry.seriesId, status: nil, watched: 0, score: nil)
+            switch res {
+            case .success: showToast("Убрано из списка")
+            case .failure(let err): showToast(err.userMessage)
+            }
+        }
+    }
+
+    private func showToast(_ text: String) {
+        withAnimation { toastMessage = text }
+        Task {
+            try? await Task.sleep(nanoseconds: 2_600_000_000)
+            if toastMessage == text {
+                withAnimation { toastMessage = nil }
+            }
+        }
+    }
+}
+
+private struct ListedProgressRow: View {
+    let item: ListedTitle
+    let onBump: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            PosterView(urlString: item.posterUrl, cornerRadius: 10)
+                .frame(width: 56, height: 82)
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .top, spacing: 6) {
+                    Text(item.displayTitle)
+                        .font(NfType.title)
+                        .foregroundColor(Nf.text)
+                        .lineLimit(2)
+
+                    Spacer(minLength: 4)
+
+                    if item.behind > 0 {
+                        Text("+\(item.behind)")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(Nf.ink)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(Nf.mint, in: Capsule())
+                    }
+                }
+
+                Text(ListProgress.line(item))
+                    .font(NfType.caption)
+                    .foregroundColor(Nf.textDim)
+                    .lineLimit(1)
+
+                if let frac = ListProgress.fraction(item) {
+                    ProgressView(value: frac)
+                        .tint(item.behind > 0 ? Nf.mint : Nf.violet)
+                }
+            }
+
+            if item.status == .watching {
+                Button(action: onBump) {
+                    Text("+1")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundColor(Nf.mint)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(Nf.mint.opacity(0.14), in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+}
