@@ -37,10 +37,25 @@ final class AccountStore: ObservableObject {
     }
 
     private func applySignedIn(_ profile: Profile) {
+        prefs.claimFor(userId: profile.id)
         prefs.saveProfile(profile)
         unconfirmed = false
         expired = false
         state = .signedIn(profile)
+        Task { await flushPendingWatches() }
+    }
+
+    func flushPendingWatches() async {
+        guard isSignedIn, !prefs.pendingWatches.isEmpty else { return }
+        let items = prefs.pendingWatches
+        for item in items {
+            do {
+                try await api.markWatched(translationId: item.translationId)
+                prefs.removePendingWatch(translationId: item.translationId)
+            } catch {
+                break
+            }
+        }
     }
 
     private func handleSessionLost() async {

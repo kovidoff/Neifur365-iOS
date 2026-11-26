@@ -31,9 +31,16 @@ enum ScheduleBuilder {
         let withFrac = ISO8601DateFormatter()
         withFrac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         if let d = withFrac.date(from: iso) { return d }
-        let plain = ISO8601DateFormatter()
-        plain.formatOptions = [.withInternetDateTime]
-        return plain.date(from: iso)
+        let plain = ISO86501Fallback.plain.date(from: iso)
+        return plain
+    }
+
+    private enum ISO86501Fallback {
+        static let plain: ISO8601DateFormatter = {
+            let f = ISO8601DateFormatter()
+            f.formatOptions = [.withInternetDateTime]
+            return f
+        }()
     }
 
     /// Groups ongoing Shikimori titles into the 7-day window [today..today+6] in the given calendar/timezone.
@@ -140,8 +147,9 @@ final class ScheduleViewModel: ObservableObject {
     @Published var errorMessage: String?
 
     func load(shikimori: ShikimoriClient, lists: ListsStore, force: Bool = false) async {
-        if !force && !days.isEmpty { return }
+        guard !loading, force || days.isEmpty else { return }
         loading = true
+        defer { loading = false }
         errorMessage = nil
 
         var byMalId: [Int64: ListedTitle] = [:]
@@ -155,13 +163,22 @@ final class ScheduleViewModel: ObservableObject {
             }
         }
 
-        do {
-            let ongoing = try await shikimori.ongoingSchedule(extraMalIds: extraMalIds)
-            days = ScheduleBuilder.buildWeekly(animes: ongoing, byMalId: byMalId)
-        } catch {
-            errorMessage = error.userMessage
+        if days.isEmpty, let cached = shikimori.cachedSchedule() {
+            days = ScheduleBuilder.buildWeekly(animes: cached, byMalId: byMalId)
         }
-        loading = false
+
+        do {
+            let ongoing = try await shikimori.ongoingSchedule(extraMalIds: extraMalIds, forceRefresh: force)
+            guard !Task.isCancelled else { return }
+            days = ScheduleBuilder.buildWeekly(animes: ongoing, byMalId: byMalId)
+        } catch is CancellationError {
+            return
+        } catch {
+            guard !Task.isCancelled else { return }
+            if days.isEmpty {
+                errorMessage = error.userMessage
+            }
+        }
     }
 }
 
@@ -172,12 +189,6 @@ struct ScheduleScreen: View {
     @StateObject private var vm = ScheduleViewModel()
     @State private var selectedDayIndex = 0
     @State private var onlyMine = false
-
-    private static let timeFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm"
-        return f
-    }()
 
     private static let dayHeaderFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -246,7 +257,7 @@ struct ScheduleScreen: View {
                     Section {
                         ForEach(currentItems) { item in
                             NavigationLink(value: item.route) {
-                                ScheduleRowView(item: item, timeText: Self.timeFormatter.string(from: item.airAt))
+                                ScheduleRowView(item: item, timeText: AppFormatters.formatClock(item.airAt))
                             }
                             .listRowBackground(Nf.surface)
                             .listRowSeparatorTint(Nf.line)
@@ -275,7 +286,12 @@ struct ScheduleScreen: View {
                 Button {
                     withAnimation { onlyMine.toggle() }
                 } label: {
-                    Label(onlyMine ? "Мои" : "Все", systemImage: onlyMine ? "bookmark.fill" : "bookmark")
+                    HStack(spacing: 5) {
+                        Image(systemName: onlyMine ? "bookmark.fill" : "bookmark")
+                        Text(onlyMine ? "Мои онгоинги" : "Все онгоинги")
+                    }
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(onlyMine ? Nf.violet : Nf.textDim)
                 }
             }
         }
@@ -308,7 +324,9 @@ struct ScheduleScreen: View {
                                 .fill(count > 0 ? (active ? Nf.ink : Nf.mint) : Color.clear)
                                 .frame(width: 4, height: 4)
                         }
-                        .frame(width: 50, height: 60)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .frame(minWidth: 50, minHeight: 60)
                         .background(active ? Nf.violet : Nf.surfaceHi, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                     }
                     .buttonStyle(NfPressableStyle())

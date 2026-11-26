@@ -68,7 +68,9 @@ final class Anime365Client {
 
     let cookies = SessionCookies()
     private let prefs: Prefs
-    private let decoder = JSONDecoder()
+
+    private let hostLock = NSLock()
+    private var knownCustomMirrors: Set<String> = []
 
     private lazy var delegate = MirrorCookieDelegate(cookies: cookies, userAgent: userAgent) { [weak self] host in
         self?.isSiteHost(host) ?? false
@@ -99,18 +101,34 @@ final class Anime365Client {
 
     var onSessionLost: (() -> Void)?
 
+    @MainActor
     init(prefs: Prefs) {
         self.prefs = prefs
+        self.knownCustomMirrors = Set(prefs.customMirrors.map { $0.lowercased() })
+    }
+
+    @MainActor
+    func syncCustomMirrors() {
+        let set = Set(prefs.customMirrors.map { $0.lowercased() })
+        hostLock.withLock {
+            knownCustomMirrors = set
+        }
     }
 
     func isSiteHost(_ host: String?) -> Bool {
         guard let host = host?.lowercased(), !host.isEmpty else { return false }
-        let custom = prefs.customMirrors.map { $0.lowercased() }
-        if custom.contains(host) { return true }
+        let isCustom = hostLock.withLock { knownCustomMirrors.contains(host) }
+        if isCustom { return true }
         return Self.builtinMirrors.contains { host == $0 || host.hasSuffix(".\($0)") }
     }
 
-    static func avatarRequests(urlString: String?, activeMirror: String?) -> [URLRequest] {
+    static func avatarRequests(
+        urlString: String?,
+        activeMirror: String?,
+        customMirrors: [String] = [],
+        userAgent: String? = nil,
+        cookieHeader: String? = nil
+    ) -> [URLRequest] {
         guard let urlString,
               let original = URL(string: urlString),
               let host = original.host?.lowercased(),
@@ -118,35 +136,41 @@ final class Anime365Client {
               scheme == "https" || scheme == "http",
               original.user == nil, original.password == nil else { return [] }
 
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
-        let preferred = activeMirror.flatMap { builtinMirrors.contains($0) ? [$0] : nil } ?? []
-        let knownMirrors = preferred + builtinMirrors
+        let allKnown = builtinMirrors + customMirrors.map { $0.lowercased() }.filter { !builtinMirrors.contains($0) }
+        let preferred = activeMirror.flatMap { allKnown.contains($0.lowercased()) ? [$0.lowercased()] : nil } ?? []
+        let orderedMirrors = preferred + allKnown
         var urls = [original]
 
-        // Only rewrite avatars served by Anime 365 itself. Third-party image URLs stay intact.
-        if knownMirrors.contains(host),
+        if orderedMirrors.contains(host),
            var alternate = URLComponents(url: original, resolvingAgainstBaseURL: false),
            alternate.user == nil, alternate.password == nil, alternate.port == nil {
-            for mirror in knownMirrors where mirror != host {
+            for mirror in orderedMirrors where mirror != host {
                 alternate.scheme = "https"
                 alternate.host = mirror
                 if let url = alternate.url, !urls.contains(url) { urls.append(url) }
             }
         }
 
+        let ua = userAgent ?? "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
         return urls.map { url in
-            var request = URLRequest(url: url, timeoutInterval: 5)
+            var request = URLRequest(url: url, timeoutInterval: 6)
             request.httpShouldHandleCookies = false
-            request.setValue("Neifur365/\(version) (iOS)", forHTTPHeaderField: "User-Agent")
+            request.setValue(ua, forHTTPHeaderField: "User-Agent")
             request.setValue("image/*", forHTTPHeaderField: "Accept")
+            if let urlHost = url.host?.lowercased(), orderedMirrors.contains(urlHost),
+               let cookieHeader, !cookieHeader.isEmpty {
+                request.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
+            }
             return request
         }
     }
 
     // MARK: - Mirrors
 
-    func mirrorList() -> [(String, MirrorOrigin)] {
-        let custom = prefs.customMirrors.filter { !Self.builtinMirrors.contains($0) }
+    func mirrorList() async -> [(String, MirrorOrigin)] {
+        let custom = await MainActor.run {
+            prefs.customMirrors.filter { !Self.builtinMirrors.contains($0) }
+        }
         return Self.builtinMirrors.map { ($0, .builtin) } + custom.map { ($0, .custom) }
     }
 
@@ -163,7 +187,7 @@ final class Anime365Client {
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             let body = String(data: data, encoding: .utf8) ?? ""
             let health: MirrorHealth
-            if body.contains("Just a moment") || body.contains("cf-chl") {
+            if Self.looksLikeCloudflare(body: body, statusCode: code) {
                 health = .blocked
             } else if (200...299).contains(code) && body.hasPrefix("{\"data\"") {
                 health = ms > 2500 ? .slow : .ok
@@ -179,7 +203,7 @@ final class Anime365Client {
 
     func probeAll() async -> [MirrorStatus] {
         let current = await MainActor.run { prefs.mirror }
-        let mirrors = mirrorList()
+        let mirrors = await mirrorList()
         return await withTaskGroup(of: (Int, MirrorStatus).self) { group in
             for (idx, item) in mirrors.enumerated() {
                 group.addTask {
@@ -242,6 +266,18 @@ final class Anime365Client {
         return try await task.value
     }
 
+    func ensureMirrorWorking() async {
+        let current = await MainActor.run { prefs.mirror }
+        guard let current, !current.isEmpty else {
+            _ = try? await resolveMirror()
+            return
+        }
+        let status = await probe(host: current)
+        if !status.ok {
+            _ = try? await resolveMirror(exclude: current)
+        }
+    }
+
     @MainActor
     func pickMirror(_ host: String) {
         prefs.mirrorAuto = false
@@ -264,6 +300,7 @@ final class Anime365Client {
         guard !cleaned.isEmpty, cleaned.contains(".") else { return nil }
         if !Self.builtinMirrors.contains(cleaned) && !prefs.customMirrors.contains(cleaned) {
             prefs.customMirrors.append(cleaned)
+            syncCustomMirrors()
         }
         return cleaned
     }
@@ -271,7 +308,15 @@ final class Anime365Client {
     @MainActor
     func removeCustomMirror(_ host: String) {
         prefs.customMirrors.removeAll { $0 == host }
+        syncCustomMirrors()
         if prefs.mirror == host { prefs.mirror = nil }
+    }
+
+    private static func looksLikeCloudflare(body: String, statusCode: Int) -> Bool {
+        if body.contains("Just a moment") || body.contains("cf-chl") || body.contains("Attention Required! | Cloudflare") {
+            return true
+        }
+        return statusCode == 403 && body.localizedCaseInsensitiveContains("cloudflare") && !body.hasPrefix("{")
     }
 
     private func mirrored<T>(_ block: (String) async throws -> T) async throws -> T {
@@ -280,16 +325,16 @@ final class Anime365Client {
             return try await block("https://\(first)")
         } catch {
             let mirrorDown: Bool
-            if let http = error as? HttpError {
-                mirrorDown = http.code >= 500
-            } else if error is URLError {
+            if error is CloudflareBlockedError || error is URLError {
                 mirrorDown = true
+            } else if let http = error as? HttpError {
+                mirrorDown = http.code >= 500
             } else {
                 mirrorDown = false
             }
             guard mirrorDown else { throw error }
 
-            if let retry = try? await block("https://\(first)") {
+            if !(error is CloudflareBlockedError), let retry = try? await block("https://\(first)") {
                 return retry
             }
             let next = try await resolveMirror(exclude: first)
@@ -328,6 +373,9 @@ final class Anime365Client {
             cookies.save(from: http, url: url)
         }
         let body = String(data: data, encoding: .utf8) ?? ""
+        if Self.looksLikeCloudflare(body: body, statusCode: http.statusCode) {
+            throw CloudflareBlockedError()
+        }
         if !(200...299).contains(http.statusCode) && http.statusCode != 403 {
             throw HttpError(code: http.statusCode, bodySnippet: String(body.prefix(300)))
         }
@@ -362,7 +410,7 @@ final class Anime365Client {
                 throw ApiError("Пустой ответ Anime 365")
             }
             let payloadData = try JSONSerialization.data(withJSONObject: payload)
-            return try decoder.decode(T.self, from: payloadData)
+            return try JSONDecoder().decode(T.self, from: payloadData)
         }
     }
 
@@ -459,6 +507,7 @@ final class Anime365Client {
         }
         let fetched = try await api("/series/\(id)", as: Series.self)
         cacheLock.withLock {
+            if seriesCache.count >= 64 { seriesCache.removeAll() }
             seriesCache[id] = (Date(), fetched)
         }
         return fetched
@@ -600,12 +649,6 @@ final class Anime365Client {
         return SitePages.list(html)
     }
 
-    func listRecord(seriesId: Int64) async throws -> ListRecord {
-        let html = try await page("/animelist/edit/\(seriesId)?mode=mini")
-        if SitePages.isSignedOut(html) { throw triggerSessionLost() }
-        return SitePages.listRecord(html)
-    }
-
     func setListRecord(seriesId: Int64, status: ListStatus?, watched: Int, score: Int?) async throws {
         _ = try await post("/animelist/edit/\(seriesId)?mode=mini", form: [
             "UsersRates[score]": String(score ?? 0),
@@ -643,7 +686,6 @@ final class Anime365Client {
         }
     }
 
-    /// Measures download throughput of a video channel using a 2 MB ranged probe.
     func measure(channel: VideoChannel, maxBytes: Int64 = 2_097_152) async -> ChannelSpeed {
         func measureUrl(_ rawUrl: String) async -> Double {
             let sep = rawUrl.contains("?") ? "&" : "?"

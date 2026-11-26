@@ -15,7 +15,7 @@ packages:
     from: 12.8.0
   MPVKit:
     url: https://github.com/mpvkit/MPVKit
-    from: 1.0.0
+    exactVersion: 1.0.0
 
 settings:
   base:

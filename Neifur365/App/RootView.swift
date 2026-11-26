@@ -4,7 +4,7 @@ enum RootTab: String, CaseIterable, Identifiable {
     case home
     case library
     case catalog
-    case downloads
+    case settings
 
     var id: String { rawValue }
 
@@ -13,51 +13,122 @@ enum RootTab: String, CaseIterable, Identifiable {
         case .home: return "Главная"
         case .library: return "Списки"
         case .catalog: return "Каталог"
-        case .downloads: return "Загрузки"
+        case .settings: return "Настройки"
         }
     }
 
     var icon: String {
         switch self {
-        case .home: return "house.fill"
-        case .library: return "bookmark.fill"
-        case .catalog: return "square.grid.2x2.fill"
-        case .downloads: return "arrow.down.circle.fill"
+        case .home: return "house"
+        case .library: return "bookmark"
+        case .catalog: return "square.grid.2x2"
+        case .settings: return "gearshape"
         }
     }
 }
 
+private struct DeepLinkRoute: Identifiable {
+    let seriesId: Int64
+    var id: Int64 { seriesId }
+}
+
 struct RootView: View {
-    @EnvironmentObject private var downloads: DownloadManager
+    @EnvironmentObject private var prefs: Prefs
+    @Binding var pendingDeepLinkSeriesId: Int64?
+
     @State private var selectedTab: RootTab = .home
+    @State private var showWelcome = false
+    @State private var showSignIn = false
+    @State private var deepLinkRoute: DeepLinkRoute?
 
     var body: some View {
-        TabView(selection: $selectedTab) {
-            HomeScreen()
-                .tabItem {
-                    Label(RootTab.home.title, systemImage: RootTab.home.icon)
+        tabContent
+            .tint(Nf.violet)
+            .onAppear {
+                if !prefs.onboarded {
+                    showWelcome = true
                 }
-                .tag(RootTab.home)
+                consumePendingDeepLink()
+            }
+            .onChange(of: pendingDeepLinkSeriesId) { _ in
+                consumePendingDeepLink()
+            }
+            .sheet(isPresented: $showWelcome) {
+                WelcomeSheet {
+                    showSignIn = true
+                }
+            }
+            .sheet(isPresented: $showSignIn) {
+                SignInSheet()
+            }
+            .sheet(item: $deepLinkRoute) { route in
+                NavigationStack {
+                    AnimePreviewScreen(route: AnimeRoute(id: route.seriesId, title: "Аниме", posterUrl: nil))
+                        .navigationDestination(for: AnimeRoute.self) { next in
+                            AnimePreviewScreen(route: next)
+                        }
+                        .navigationDestination(for: CatalogFilterPreset.self) { preset in
+                            CatalogFilteredScreen(preset: preset)
+                        }
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) {
+                                Button("Закрыть") { deepLinkRoute = nil }
+                            }
+                        }
+                }
+            }
+    }
 
-            LibraryScreen()
-                .tabItem {
-                    Label(RootTab.library.title, systemImage: RootTab.library.icon)
+    @ViewBuilder
+    private var tabContent: some View {
+        if #available(iOS 26.0, *) {
+            TabView(selection: $selectedTab) {
+                Tab(RootTab.home.title, systemImage: RootTab.home.icon, value: .home) {
+                    HomeScreen()
                 }
-                .tag(RootTab.library)
+                Tab(RootTab.library.title, systemImage: RootTab.library.icon, value: .library) {
+                    LibraryScreen()
+                }
+                Tab(RootTab.catalog.title, systemImage: RootTab.catalog.icon, value: .catalog) {
+                    CatalogScreen()
+                }
+                Tab(RootTab.settings.title, systemImage: RootTab.settings.icon, value: .settings) {
+                    SettingsScreen()
+                }
+            }
+            .tabBarMinimizeBehavior(.onScrollDown)
+        } else {
+            TabView(selection: $selectedTab) {
+                HomeScreen()
+                    .tabItem {
+                        Label(RootTab.home.title, systemImage: RootTab.home.icon)
+                    }
+                    .tag(RootTab.home)
 
-            CatalogScreen()
-                .tabItem {
-                    Label(RootTab.catalog.title, systemImage: RootTab.catalog.icon)
-                }
-                .tag(RootTab.catalog)
+                LibraryScreen()
+                    .tabItem {
+                        Label(RootTab.library.title, systemImage: RootTab.library.icon)
+                    }
+                    .tag(RootTab.library)
 
-            DownloadsScreen()
-                .tabItem {
-                    Label(RootTab.downloads.title, systemImage: RootTab.downloads.icon)
-                }
-                .badge(downloads.activeCount)
-                .tag(RootTab.downloads)
+                CatalogScreen()
+                    .tabItem {
+                        Label(RootTab.catalog.title, systemImage: RootTab.catalog.icon)
+                    }
+                    .tag(RootTab.catalog)
+
+                SettingsScreen()
+                    .tabItem {
+                        Label(RootTab.settings.title, systemImage: RootTab.settings.icon)
+                    }
+                    .tag(RootTab.settings)
+            }
         }
-        .tint(Nf.violet)
+    }
+
+    private func consumePendingDeepLink() {
+        guard let sid = pendingDeepLinkSeriesId else { return }
+        pendingDeepLinkSeriesId = nil
+        deepLinkRoute = DeepLinkRoute(seriesId: sid)
     }
 }

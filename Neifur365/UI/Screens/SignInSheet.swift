@@ -139,20 +139,57 @@ private struct SiteSignInSheet: View {
     let onSignedIn: () -> Void
 
     @State private var isLoading = true
+    @State private var loadError: String?
+    @State private var reloadTrigger = 0
     @State private var adopted = false
     @State private var lastCookieFingerprint = ""
     @State private var checking = false
 
+    private var loginURL: URL? {
+        URL(string: "\(baseUrl)/users/login")
+    }
+
     var body: some View {
         NavigationStack {
             ZStack {
-                SiteLoginWebView(
-                    url: URL(string: "\(baseUrl)/users/login")!,
-                    userAgent: app.a365.userAgent,
-                    isSiteHost: { app.a365.isSiteHost($0) },
-                    isLoading: $isLoading,
-                    onSitePageFinished: { Task { await checkWebCookies(force: false) } }
-                )
+                if let url = loginURL {
+                    SiteLoginWebView(
+                        url: url,
+                        userAgent: app.a365.userAgent,
+                        reloadTrigger: reloadTrigger,
+                        isSiteHost: { app.a365.isSiteHost($0) },
+                        isLoading: $isLoading,
+                        loadError: $loadError,
+                        onSitePageFinished: { Task { await checkWebCookies(force: false) } }
+                    )
+                } else {
+                    Text("Неверный адрес зеркала: \(baseUrl)")
+                        .font(.subheadline)
+                        .foregroundColor(Nf.red)
+                }
+
+                if let loadError, !isLoading {
+                    VStack(spacing: 12) {
+                        Image(systemName: "wifi.slash")
+                            .font(.system(size: 36))
+                            .foregroundColor(Nf.amber)
+                        Text("Не удалось открыть страницу входа")
+                            .font(.headline)
+                            .foregroundColor(Nf.text)
+                        Text(loadError)
+                            .font(.caption)
+                            .foregroundColor(Nf.textDim)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 24)
+                        Button("Повторить") {
+                            self.loadError = nil
+                            reloadTrigger += 1
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Nf.ink.opacity(0.95))
+                }
 
                 if adopted {
                     Color.black.opacity(0.82)
@@ -170,7 +207,7 @@ private struct SiteSignInSheet: View {
             .navigationTitle(URL(string: baseUrl)?.host ?? "Anime 365")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
+                ToolbarItem(placement: .confirmationAction) {
                     Button("Готово") {
                         Task {
                             await checkWebCookies(force: true)
@@ -226,8 +263,10 @@ private struct SiteSignInSheet: View {
 private struct SiteLoginWebView: UIViewRepresentable {
     let url: URL
     let userAgent: String
+    let reloadTrigger: Int
     let isSiteHost: (String?) -> Bool
     @Binding var isLoading: Bool
+    @Binding var loadError: String?
     let onSitePageFinished: () -> Void
 
     func makeCoordinator() -> Coordinator {
@@ -237,19 +276,28 @@ private struct SiteLoginWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()
+        config.preferences.javaScriptCanOpenWindowsAutomatically = true
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.customUserAgent = userAgent
         webView.navigationDelegate = context.coordinator
+        webView.uiDelegate = context.coordinator
         webView.isOpaque = false
         webView.backgroundColor = UIColor(Nf.ink)
         webView.load(URLRequest(url: url))
+        context.coordinator.lastReloadTrigger = reloadTrigger
         return webView
     }
 
-    func updateUIView(_ uiView: WKWebView, context: Context) {}
+    func updateUIView(_ uiView: WKWebView, context: Context) {
+        if context.coordinator.lastReloadTrigger != reloadTrigger {
+            context.coordinator.lastReloadTrigger = reloadTrigger
+            uiView.load(URLRequest(url: url))
+        }
+    }
 
-    final class Coordinator: NSObject, WKNavigationDelegate {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         private let parent: SiteLoginWebView
+        var lastReloadTrigger = 0
 
         init(_ parent: SiteLoginWebView) {
             self.parent = parent
@@ -257,6 +305,7 @@ private struct SiteLoginWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
             parent.isLoading = true
+            parent.loadError = nil
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -268,6 +317,25 @@ private struct SiteLoginWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             parent.isLoading = false
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            parent.isLoading = false
+            if (error as NSError).code != NSURLErrorCancelled {
+                parent.loadError = error.localizedDescription
+            }
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            createWebViewWith configuration: WKWebViewConfiguration,
+            for navigationAction: WKNavigationAction,
+            windowFeatures: WKWindowFeatures
+        ) -> WKWebView? {
+            if navigationAction.targetFrame == nil {
+                webView.load(navigationAction.request)
+            }
+            return nil
         }
     }
 }

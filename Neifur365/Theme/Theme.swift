@@ -12,7 +12,6 @@ enum Nf {
     static let textDim = Color(hex: 0xA9A6BC)
     static let textMute = Color(hex: 0x6F6C84)
     static let violet = Color(hex: 0x9B7BFF)
-    static let onViolet = Color(hex: 0x14102A)
     static let pink = Color(hex: 0xFF6B9A)
     static let mint = Color(hex: 0x5CF2B0)
     static let amber = Color(hex: 0xFFC56B)
@@ -28,32 +27,18 @@ extension Color {
     }
 }
 
-/// Screen-scoped accent color; detail screens tint it from the anime poster.
-private struct NfAccentKey: EnvironmentKey {
-    static let defaultValue: Color = Nf.VioletCompat
-}
-
-private extension Nf {
-    static var VioletCompat: Color { violet }
-}
-
-extension EnvironmentValues {
-    var nfAccent: Color {
-        get { self[NfAccentKey.self] }
-        set { self[NfAccentKey.self] = newValue }
-    }
-}
-
-/// Loads bundled variable fonts (Manrope / Unbounded) with exact `wght` axis values.
+/// Loads bundled variable fonts (Manrope / Unbounded) with exact `wght` axis values and Dynamic Type scaling.
 enum NfFont {
     private static let weightAxisTag: UInt32 = 0x77676874 // 'wght'
 
-    static func manrope(size: CGFloat, weight: Int) -> Font {
-        variableFont(postScriptName: "Manrope-ExtraLight", size: size, weight: weight)
+    static func manrope(size: CGFloat, weight: Int, relativeTo textStyle: UIFont.TextStyle = .body) -> Font {
+        let scaled = UIFontMetrics(forTextStyle: textStyle).scaledValue(for: size)
+        return variableFont(postScriptName: "Manrope-ExtraLight", size: scaled, weight: weight)
     }
 
-    static func unbounded(size: CGFloat, weight: Int) -> Font {
-        variableFont(postScriptName: "Unbounded-Regular", size: size, weight: weight)
+    static func unbounded(size: CGFloat, weight: Int, relativeTo textStyle: UIFont.TextStyle = .headline) -> Font {
+        let scaled = UIFontMetrics(forTextStyle: textStyle).scaledValue(for: size)
+        return variableFont(postScriptName: "Unbounded-Regular", size: scaled, weight: weight)
     }
 
     static func variableUIFont(postScriptName: String, size: CGFloat, weight: Int) -> UIFont {
@@ -86,16 +71,56 @@ enum NfFont {
     }
 }
 
-/// Typography tokens matching the Android Compose theme (`Theme.kt`).
+/// Typography tokens aligned with Dynamic Type and bundled display/body fonts.
 enum NfType {
-    static let hero = NfFont.unbounded(size: 26, weight: 600)
-    static let display = NfFont.unbounded(size: 21, weight: 600)
-    static let section = NfFont.unbounded(size: 15, weight: 500)
-    static let title = NfFont.manrope(size: 16, weight: 700)
-    static let body = NfFont.manrope(size: 14.5, weight: 500)
-    static let label = NfFont.manrope(size: 13, weight: 600)
-    static let caption = NfFont.manrope(size: 11.5, weight: 600)
-    static let overline = NfFont.manrope(size: 10.5, weight: 800)
+    static var hero: Font { NfFont.unbounded(size: 26, weight: 600, relativeTo: .largeTitle) }
+    static var display: Font { NfFont.unbounded(size: 21, weight: 600, relativeTo: .title2) }
+    static var section: Font { NfFont.unbounded(size: 15, weight: 500, relativeTo: .headline) }
+    static var title: Font { NfFont.manrope(size: 16, weight: 700, relativeTo: .headline) }
+    static var body: Font { NfFont.manrope(size: 14.5, weight: 500, relativeTo: .body) }
+    static var label: Font { NfFont.manrope(size: 13, weight: 600, relativeTo: .subheadline) }
+    static var caption: Font { NfFont.manrope(size: 11.5, weight: 600, relativeTo: .caption1) }
+    static var overline: Font { NfFont.manrope(size: 10.5, weight: 800, relativeTo: .caption2) }
+}
+
+// MARK: - iOS 26 Liquid Glass Helpers
+
+extension View {
+    @ViewBuilder
+    func nfGlassCapsule() -> some View {
+        if #available(iOS 26.0, *) {
+            self.glassEffect(.regular, in: .capsule)
+        } else {
+            self
+                .background(.ultraThinMaterial, in: Capsule())
+                .overlay(Capsule().stroke(Color.white.opacity(0.14), lineWidth: 0.7))
+        }
+    }
+
+    @ViewBuilder
+    func nfGlassCircle() -> some View {
+        if #available(iOS 26.0, *) {
+            self.glassEffect(.regular, in: .circle)
+        } else {
+            self
+                .background(.ultraThinMaterial, in: Circle())
+                .overlay(Circle().stroke(Color.white.opacity(0.14), lineWidth: 0.7))
+        }
+    }
+
+    @ViewBuilder
+    func nfGlassCard(cornerRadius: CGFloat = 18) -> some View {
+        if #available(iOS 26.0, *) {
+            self.glassEffect(.regular, in: .rect(cornerRadius: cornerRadius))
+        } else {
+            self
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .stroke(Color.white.opacity(0.12), lineWidth: 0.7)
+                )
+        }
+    }
 }
 
 /// Subtle spring scale feedback for cards and buttons.

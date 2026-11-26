@@ -1,7 +1,7 @@
 import Combine
 import Foundation
 
-struct ListedTitle: Identifiable, Hashable {
+struct ListedTitle: Identifiable, Hashable, Codable {
     var entry: ListEntry
     var series: Series?
     var aired: Int?
@@ -81,12 +81,14 @@ final class ListsStore: ObservableObject {
 
     private let api: Anime365Client
     private let account: AccountStore
+    private let offlineCache: OfflineCache
     private var refreshTask: Task<Void, Never>?
     private var cancellables = Set<AnyCancellable>()
 
-    init(api: Anime365Client, account: AccountStore) {
+    init(api: Anime365Client, account: AccountStore, offlineCache: OfflineCache) {
         self.api = api
         self.account = account
+        self.offlineCache = offlineCache
 
         account.$state
             .removeDuplicates()
@@ -94,6 +96,12 @@ final class ListsStore: ObservableObject {
                 guard let self else { return }
                 switch st {
                 case .signedIn(let profile):
+                    if !self.loaded, let cached = self.offlineCache.readLists(userId: profile.id) {
+                        var map: [Int64: ListedTitle] = [:]
+                        for item in cached.titles { map[item.entry.seriesId] = item }
+                        self.titles = map
+                        self.loaded = !map.isEmpty
+                    }
                     self.refresh(userId: profile.id)
                 case .signedOut:
                     self.refreshTask?.cancel()
@@ -204,40 +212,55 @@ final class ListsStore: ObservableObject {
     func refresh(userId explicitUserId: Int64? = nil) {
         guard let userId = explicitUserId ?? account.profile?.id else { return }
         refreshTask?.cancel()
-        loading = true
-        error = nil
-
         refreshTask = Task {
-            do {
-                let entries = try await api.allLists(userId: userId)
-                let cards = (try? await api.cards(ids: entries.map(\.seriesId))) ?? []
-                let cardsById = Dictionary(uniqueKeysWithValues: cards.map { ($0.id, $0) })
-                let known = self.titles
-
-                var map: [Int64: ListedTitle] = [:]
-                for e in entries {
-                    map[e.seriesId] = ListedTitle(entry: e, series: cardsById[e.seriesId], aired: known[e.seriesId]?.aired)
-                }
-
-                if Task.isCancelled { return }
-                self.titles = map
-                self.loaded = true
-                self.loading = false
-                self.updatedAt = Date()
-
-                let airingWatching = map.values.filter { $0.airing && $0.status == .watching }
-                await self.countAired(Array(airingWatching))
-                let airingPlanned = map.values.filter { $0.airing && $0.status == .planned }
-                await self.countAired(Array(airingPlanned))
-            } catch {
-                if Task.isCancelled { return }
-                self.loading = false
-                self.error = error.userMessage
-            }
+            await performRefresh(userId: userId)
         }
     }
 
-    private func countAired(_ list: [ListedTitle]) async {
+    func refreshAsync(userId explicitUserId: Int64? = nil) async {
+        guard let userId = explicitUserId ?? account.profile?.id else { return }
+        refreshTask?.cancel()
+        let task = Task {
+            await performRefresh(userId: userId)
+        }
+        refreshTask = task
+        await task.value
+    }
+
+    private func performRefresh(userId: Int64) async {
+        loading = true
+        error = nil
+
+        do {
+            let entries = try await api.allLists(userId: userId)
+            let cards = (try? await api.cards(ids: entries.map(\.seriesId))) ?? []
+            let cardsById = Dictionary(uniqueKeysWithValues: cards.map { ($0.id, $0) })
+            let known = self.titles
+
+            var map: [Int64: ListedTitle] = [:]
+            for e in entries {
+                map[e.seriesId] = ListedTitle(entry: e, series: cardsById[e.seriesId], aired: known[e.seriesId]?.aired)
+            }
+
+            if Task.isCancelled { loading = false; return }
+            self.titles = map
+            self.loaded = true
+            self.loading = false
+            self.updatedAt = Date()
+            self.offlineCache.writeLists(userId: userId, titles: Array(map.values))
+
+            let airingWatching = map.values.filter { $0.airing && $0.status == .watching }
+            await self.countAired(Array(airingWatching), userId: userId)
+            let airingPlanned = map.values.filter { $0.airing && $0.status == .planned }
+            await self.countAired(Array(airingPlanned), userId: userId)
+        } catch {
+            if Task.isCancelled { loading = false; return }
+            self.loading = false
+            self.error = error.userMessage
+        }
+    }
+
+    private func countAired(_ list: [ListedTitle], userId: Int64) async {
         guard !list.isEmpty else { return }
         for batch in stride(from: 0, to: list.count, by: 3) {
             if Task.isCancelled { return }
@@ -257,6 +280,7 @@ final class ListsStore: ObservableObject {
                 }
             }
         }
+        offlineCache.writeLists(userId: userId, titles: Array(titles.values))
     }
 
     @discardableResult
@@ -295,6 +319,9 @@ final class ListsStore: ObservableObject {
 
         do {
             try await api.setListRecord(seriesId: seriesId, status: status, watched: watched, score: score)
+            if let uid = account.profile?.id {
+                offlineCache.writeLists(userId: uid, titles: Array(titles.values))
+            }
             return .success(())
         } catch {
             if let before {

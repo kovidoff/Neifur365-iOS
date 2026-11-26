@@ -3,6 +3,7 @@ import Foundation
 
 enum DownloadStatus: String, Codable, Hashable {
     case queued
+    case waitingWifi
     case downloading
     case completed
     case failed
@@ -28,10 +29,11 @@ struct DownloadedEpisode: Codable, Hashable, Identifiable {
     var errorMessage: String?
     var addedAt: Date
     var transferId: UUID?
+    var pendingUrlString: String?
 
     var id: Int64 { episodeId }
     var isReady: Bool { status == .completed && videoFileName != nil }
-    var isActive: Bool { status == .queued || status == .downloading }
+    var isActive: Bool { status == .queued || status == .downloading || status == .waitingWifi }
 
     fileprivate var taskDescription: String {
         transferId.map { "\(episodeId):\($0.uuidString)" } ?? String(episodeId)
@@ -61,10 +63,7 @@ struct DownloadedAnime: Identifiable, Hashable {
 }
 
 func formatBytes(_ bytes: Int64) -> String {
-    let formatter = ByteCountFormatter()
-    formatter.countStyle = .file
-    formatter.allowedUnits = [.useMB, .useGB, .useKB]
-    return formatter.string(fromByteCount: max(bytes, 0))
+    AppFormatters.formatBytes(bytes)
 }
 
 @MainActor
@@ -75,11 +74,11 @@ final class DownloadManager: NSObject, ObservableObject {
 
     private let api: Anime365Client
     private let prefs: Prefs
+    private let network: NetworkMonitor
     private let fm = FileManager.default
     private let downloadsDir: URL
     private let indexUrl: URL
 
-    // Main-queue delivery keeps the file move, index update and system completion ordered.
     private lazy var bgSession: URLSession = {
         let cfg = URLSessionConfiguration.background(withIdentifier: Self.sessionIdentifier)
         cfg.isDiscretionary = false
@@ -89,6 +88,7 @@ final class DownloadManager: NSObject, ObservableObject {
     }()
     private var activeTasks: [Int64: URLSessionDownloadTask] = [:]
     private var pendingRequests: [Int64: UUID] = [:]
+    private var lastProgressUIUpdate: [Int64: (time: CFAbsoluteTime, progress: Double)] = [:]
     private var didRestoreTasks = false
     private var backgroundCompletion: (() -> Void)?
 
@@ -118,9 +118,10 @@ final class DownloadManager: NSObject, ObservableObject {
         items.filter(\.isActive).count
     }
 
-    init(api: Anime365Client, prefs: Prefs) {
+    init(api: Anime365Client, prefs: Prefs, network: NetworkMonitor) {
         self.api = api
         self.prefs = prefs
+        self.network = network
 
         let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? fm.temporaryDirectory
@@ -146,7 +147,7 @@ final class DownloadManager: NSObject, ObservableObject {
     func restoreTasks() {
         guard !didRestoreTasks else { return }
         didRestoreTasks = true
-        let savedTransfers = Set(items.filter(\.isActive).map(\.taskDescription))
+        let savedTransfers = Set(items.filter { $0.status == .downloading || $0.status == .queued }.map(\.taskDescription))
         bgSession.getAllTasks { [weak self] tasks in
             DispatchQueue.main.async {
                 self?.restoreTasks(tasks, savedTransfers: savedTransfers)
@@ -161,15 +162,48 @@ final class DownloadManager: NSObject, ObservableObject {
                 continue
             }
             activeTasks[items[index].episodeId] = task
-            if task.state == .suspended {
+            if task.state == .suspended && !(prefs.wifiOnlyDownloads && !network.isWifi) {
                 task.resume()
             }
         }
-        for index in items.indices where items[index].isActive {
+        for index in items.indices where (items[index].status == .downloading || items[index].status == .queued) {
             let item = items[index]
             if savedTransfers.contains(item.taskDescription), activeTasks[item.episodeId] == nil {
                 items[index].status = .failed
-                items[index].errorMessage = "Загрузка прервана. Запусти её заново из карточки аниме."
+                items[index].errorMessage = "Загрузка была прервана — нажмите «Повторить»"
+            }
+        }
+        saveIndex()
+    }
+
+    func onNetworkPolicyChanged() {
+        if prefs.wifiOnlyDownloads && !network.isWifi {
+            for idx in items.indices where items[idx].status == .downloading {
+                let id = items[idx].episodeId
+                activeTasks.removeValue(forKey: id)?.cancel()
+                items[idx].status = .waitingWifi
+                items[idx].errorMessage = nil
+            }
+            saveIndex()
+        } else {
+            resumeWifiWaitingIfPossible()
+        }
+    }
+
+    func resumeWifiWaitingIfPossible() {
+        guard network.isConnected, (!prefs.wifiOnlyDownloads || network.isWifi) else { return }
+        for idx in items.indices where items[idx].status == .waitingWifi {
+            if let urlStr = items[idx].pendingUrlString, let url = URL(string: urlStr) {
+                items[idx].status = .downloading
+                var req = URLRequest(url: url)
+                req.setValue(api.userAgent, forHTTPHeaderField: "User-Agent")
+                let task = bgSession.downloadTask(with: req)
+                task.taskDescription = items[idx].taskDescription
+                activeTasks[items[idx].episodeId] = task
+                task.resume()
+            } else {
+                items[idx].status = .failed
+                items[idx].errorMessage = "Нажмите «Повторить» для возобновления"
             }
         }
         saveIndex()
@@ -191,7 +225,6 @@ final class DownloadManager: NSObject, ObservableObject {
         return fm.fileExists(atPath: url.path) ? url : nil
     }
 
-    /// Queues one episode for background download (resolving embed URL + downloading .ass subtitles if present).
     @discardableResult
     func enqueue(
         series: Series,
@@ -233,17 +266,73 @@ final class DownloadManager: NSObject, ObservableObject {
             translation = picked
         }
 
+        return try await startDownload(
+            seriesId: series.id,
+            animeTitle: series.title,
+            posterUrl: series.bestPosterUrl,
+            episode: episode,
+            translation: translation,
+            targetQuality: targetQuality,
+            transferId: transferId
+        )
+    }
+
+    func retry(episodeId: Int64) async throws {
+        guard let existing = item(forEpisodeId: episodeId), existing.status == .failed else { return }
+        let transferId = UUID()
+        pendingRequests[episodeId] = transferId
+        defer {
+            if pendingRequests[episodeId] == transferId {
+                pendingRequests.removeValue(forKey: episodeId)
+            }
+        }
+        let fullEp = try await api.episode(id: episodeId)
+        let translation = (fullEp.translations ?? []).first { $0.id == existing.translationId }
+            ?? TranslationPicker.choose(
+                all: fullEp.translations ?? [],
+                pick: prefs.pick(animeId: existing.animeId),
+                preferred: prefs.preferredKind,
+                favourites: prefs.favouriteStudioKeys,
+                quality: existing.qualityHeight
+            )
+        guard let translation else {
+            throw ApiError("Перевод для этой серии больше не доступен")
+        }
+        _ = try await startDownload(
+            seriesId: existing.animeId,
+            animeTitle: existing.animeTitle,
+            posterUrl: existing.posterUrl,
+            episode: existing.toEpisode(),
+            translation: translation,
+            targetQuality: existing.qualityHeight,
+            transferId: transferId
+        )
+    }
+
+    private func startDownload(
+        seriesId: Int64,
+        animeTitle: String,
+        posterUrl: String?,
+        episode: Episode,
+        translation: Translation,
+        targetQuality: Int,
+        transferId: UUID
+    ) async throws -> Bool {
+        let id = episode.id
         let embed = try await api.embed(translationId: translation.id)
         let sortedStreams = embed.stream
             .filter { !$0.urls.isEmpty }
             .sorted { $0.height > $1.height }
-        guard let stream = sortedStreams.first(where: { $0.height <= targetQuality }) ?? sortedStreams.last,
-              let rawUrl = stream.urls.first,
-              let videoUrl = URL(string: rawUrl),
-              ["https", "http"].contains(videoUrl.scheme?.lowercased() ?? ""), videoUrl.host != nil else {
-            throw ApiError("Anime 365 не выдал ссылку на видео для скачивания")
-        }
-        guard videoUrl.pathExtension.lowercased() != "m3u8" else {
+        let stream = sortedStreams.first(where: { $0.height <= targetQuality }) ?? sortedStreams.last
+        let downloadableUrl = stream?.urls.compactMap { raw -> URL? in
+            guard let u = URL(string: raw),
+                  ["https", "http"].contains(u.scheme?.lowercased() ?? ""),
+                  u.host != nil,
+                  u.pathExtension.lowercased() != "m3u8" else { return nil }
+            return u
+        }.first
+
+        guard let stream, let videoUrl = downloadableUrl else {
             throw ApiError("Эта версия серии доступна только для просмотра онлайн")
         }
 
@@ -261,18 +350,19 @@ final class DownloadManager: NSObject, ObservableObject {
             }
         }
 
+        let waitForWifi = prefs.wifiOnlyDownloads && !network.isWifi
         let record = DownloadedEpisode(
-            episodeId: episode.id,
-            animeId: series.id,
-            animeTitle: series.title,
-            posterUrl: series.bestPosterUrl,
+            episodeId: id,
+            animeId: seriesId,
+            animeTitle: animeTitle,
+            posterUrl: posterUrl,
             episodeNumber: episode.number,
             episodeLabel: episode.label,
             translationId: translation.id,
             studioName: translation.author,
             translationKind: translation.kind,
             qualityHeight: stream.height > 0 ? stream.height : targetQuality,
-            status: .downloading,
+            status: waitForWifi ? .waitingWifi : .downloading,
             progress: 0,
             bytesDownloaded: 0,
             totalBytes: 0,
@@ -280,7 +370,8 @@ final class DownloadManager: NSObject, ObservableObject {
             subtitleFileName: subFileName,
             errorMessage: nil,
             addedAt: Date(),
-            transferId: transferId
+            transferId: transferId,
+            pendingUrlString: videoUrl.absoluteString
         )
         do {
             try persistNewTransfer(record)
@@ -289,12 +380,14 @@ final class DownloadManager: NSObject, ObservableObject {
             throw error
         }
 
-        var req = URLRequest(url: videoUrl)
-        req.setValue(api.userAgent, forHTTPHeaderField: "User-Agent")
-        let task = bgSession.downloadTask(with: req)
-        task.taskDescription = record.taskDescription
-        activeTasks[id] = task
-        task.resume()
+        if !waitForWifi {
+            var req = URLRequest(url: videoUrl)
+            req.setValue(api.userAgent, forHTTPHeaderField: "User-Agent")
+            let task = bgSession.downloadTask(with: req)
+            task.taskDescription = record.taskDescription
+            activeTasks[id] = task
+            task.resume()
+        }
         return true
     }
 
@@ -311,13 +404,13 @@ final class DownloadManager: NSObject, ObservableObject {
     func cancelOrDelete(episodeId: Int64) {
         pendingRequests.removeValue(forKey: episodeId)
         activeTasks.removeValue(forKey: episodeId)?.cancel()
+        lastProgressUIUpdate.removeValue(forKey: episodeId)
         if let item = item(forEpisodeId: episodeId) {
             removeFile(named: item.videoFileName)
             removeFile(named: item.subtitleFileName)
         }
         items.removeAll { $0.episodeId == episodeId }
         saveIndex()
-        restoreTasks()
     }
 
     func deleteAnime(animeId: Int64) {
@@ -396,12 +489,25 @@ extension DownloadManager: URLSessionDownloadDelegate {
             guard let index = self.index(for: downloadTask) else { return }
             let id = items[index].episodeId
             activeTasks[id] = downloadTask
+
+            let newProgress = totalBytesExpectedToWrite > 0
+                ? min(max(Double(totalBytesWritten) / Double(totalBytesExpectedToWrite), 0), 1)
+                : 0
+            let now = CFAbsoluteTimeGetCurrent()
+            let prev = lastProgressUIUpdate[id]
+            let shouldPublish = items[index].status != .downloading
+                || prev == nil
+                || (now - (prev?.time ?? 0)) >= 0.25
+                || abs(newProgress - (prev?.progress ?? 0)) >= 0.015
+            guard shouldPublish else { return }
+            lastProgressUIUpdate[id] = (now, newProgress)
+
             items[index].status = .downloading
             items[index].errorMessage = nil
             items[index].bytesDownloaded = totalBytesWritten
             if totalBytesExpectedToWrite > 0 {
                 items[index].totalBytes = totalBytesExpectedToWrite
-                items[index].progress = min(max(Double(totalBytesWritten) / Double(totalBytesExpectedToWrite), 0), 1)
+                items[index].progress = newProgress
             }
         }
     }
@@ -420,6 +526,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
         guard let index = index(for: task) else { return }
         var record = items[index]
         activeTasks.removeValue(forKey: record.episodeId)
+        lastProgressUIUpdate.removeValue(forKey: record.episodeId)
 
         do {
             guard let response = task.response as? HTTPURLResponse else {
@@ -450,6 +557,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
             record.bytesDownloaded = size
             record.totalBytes = size
             record.errorMessage = nil
+            record.pendingUrlString = nil
         } catch {
             record.status = .failed
             record.errorMessage = error.userMessage
@@ -462,7 +570,12 @@ extension DownloadManager: URLSessionDownloadDelegate {
         guard let error else { return }
         MainActor.assumeIsolated {
             guard let index = index(for: task) else { return }
-            activeTasks.removeValue(forKey: items[index].episodeId)
+            let id = items[index].episodeId
+            activeTasks.removeValue(forKey: id)
+            lastProgressUIUpdate.removeValue(forKey: id)
+            if (error as NSError).code == NSURLErrorCancelled && items[index].status == .waitingWifi {
+                return
+            }
             items[index].status = .failed
             items[index].errorMessage = error.userMessage
             saveIndex()

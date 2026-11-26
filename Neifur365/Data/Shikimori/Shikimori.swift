@@ -102,8 +102,11 @@ struct ShikiGenre: Codable, Hashable, Identifiable {
     var label: String { russian ?? name ?? "" }
 }
 
-struct ShikiStudio: Codable, Hashable {
+struct ShikiStudio: Codable, Hashable, Identifiable {
+    var id: String?
     var name: String
+
+    var stableId: String { id ?? name }
 }
 
 struct ShikiScreenshot: Codable, Hashable, Identifiable {
@@ -209,7 +212,6 @@ func shikiRatingLabel(_ rating: String?) -> String? {
     }
 }
 
-/// Cleans Shikimori BBCode markup (`[character=1]Name[/character]`, `[[link]]`, `[spoiler]...[/spoiler]`).
 func cleanShikiDescription(_ raw: String?) -> String {
     guard var text = raw, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return "" }
     text = text.replacingOccurrences(of: #"\[\[(.*?)\]\]"#, with: "$1", options: .regularExpression)
@@ -222,17 +224,41 @@ func cleanShikiDescription(_ raw: String?) -> String {
     return text.trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
-/// Rate-limited GraphQL client for Shikimori (`shikimori.io/api/graphql`).
+private let franchiseSkipKinds: Set<String> = ["music", "cm", "pv"]
+
+func sortFranchiseEntries(_ raw: [ShikiRelatedRef]) -> [ShikiRelatedRef] {
+    var seen = Set<String>()
+    return raw
+        .filter { !franchiseSkipKinds.contains($0.kind ?? "") }
+        .filter { seen.insert($0.id).inserted }
+        .sorted { a, b in
+            let ya = a.airedOn?.year ?? Int.max
+            let yb = b.airedOn?.year ?? Int.max
+            if ya != yb { return ya < yb }
+            let ma = a.airedOn?.month ?? Int.max
+            let mb = b.airedOn?.month ?? Int.max
+            if ma != mb { return ma < mb }
+            let da = a.airedOn?.day ?? Int.max
+            let db = b.airedOn?.day ?? Int.max
+            if da != db { return da < db }
+            return (Int64(a.id) ?? Int64.max) < (Int64(b.id) ?? Int64.max)
+        }
+}
+
 actor ShikimoriClient {
     private let endpoint = URL(string: "https://shikimori.io/api/graphql")!
-    private let userAgent = "Neifur365/0.3.0 (iOS)"
+    private let userAgent = "Neifur365/1.0 (iOS)"
     private let session: URLSession
-    private let decoder = JSONDecoder()
+    private let offlineCache: OfflineCache?
     private var lastCall: Date = .distantPast
     private var detailCache: [Int64: (Date, ShikiAnime)] = [:]
     private var castCache: [Int64: (Date, ShikiCast)] = [:]
+    private var franchiseCache: [String: (Date, [ShikiRelatedRef])] = [:]
+    private var studioCache: [String: (Date, [ShikiAnime])] = [:]
+    private var scheduleCache: (savedAt: Date, wanted: Set<Int64>, animes: [ShikiAnime])?
 
-    init() {
+    init(offlineCache: OfflineCache? = nil) {
+        self.offlineCache = offlineCache
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = 18
         cfg.timeoutIntervalForResource = 30
@@ -284,11 +310,11 @@ actor ShikimoriClient {
     private func decodeField<T: Decodable>(_ raw: Any?, as type: T.Type) throws -> T {
         guard let raw else { throw ApiError("Пустые данные Shikimori") }
         let jsonData = try JSONSerialization.data(withJSONObject: raw)
-        return try decoder.decode(T.self, from: jsonData)
+        return try JSONDecoder().decode(T.self, from: jsonData)
     }
 
     func detail(malId: Int64) async throws -> ShikiAnime {
-        if let hit = detailCache[malId], Date().timeIntervalSince(hit.0) < 600 {
+        if let hit = detailCache[malId], Date().timeIntervalSince(hit.0) < 300 {
             return hit.1
         }
         let data = try await query("""
@@ -298,7 +324,7 @@ actor ShikimoriClient {
             scoresStats { score count } statusesStats { status count }
             videos { kind name url imageUrl }
             poster { originalUrl mainUrl main2xUrl }
-            genres { id russian kind } studios { name }
+            genres { id russian kind } studios { id name }
             screenshots { originalUrl x332Url }
             related { relationKind relationText anime { id name russian kind score status episodes episodesAired
               airedOn { year } poster { originalUrl mainUrl main2xUrl } } }
@@ -306,12 +332,13 @@ actor ShikimoriClient {
         """)
         let list = try decodeField(data["animes"], as: [ShikiAnime].self)
         guard let first = list.first else { throw ApiError("Тайтл не найден на Shikimori") }
+        if detailCache.count >= 64 { detailCache.removeAll() }
         detailCache[malId] = (Date(), first)
         return first
     }
 
     func cast(malId: Int64) async throws -> ShikiCast {
-        if let hit = castCache[malId], Date().timeIntervalSince(hit.0) < 600 {
+        if let hit = castCache[malId], Date().timeIntervalSince(hit.0) < 300 {
             return hit.1
         }
         let data = try await query("""
@@ -331,34 +358,97 @@ actor ShikimoriClient {
         let rawStaff = (try? decodeField(first["personRoles"], as: [ShikiPersonRole].self)) ?? []
         let staff = rawStaff.filter { $0.person != nil }
         let cast = ShikiCast(characters: chars, staff: staff)
+        if castCache.count >= 64 { castCache.removeAll() }
         castCache[malId] = (Date(), cast)
         return cast
     }
 
-    func ongoingSchedule(extraMalIds: [Int64] = []) async throws -> [ShikiAnime] {
+    func franchise(name: String) async throws -> [ShikiRelatedRef] {
+        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "\"", with: "")
+        guard !clean.isEmpty else { return [] }
+        if let hit = franchiseCache[clean], Date().timeIntervalSince(hit.0) < 600 {
+            return hit.1
+        }
+        let data = try await query("""
+        { animes(franchise: "\(clean)", limit: 30, censored: false) {
+            id name russian kind score status episodes episodesAired
+            airedOn { year month day } poster { originalUrl mainUrl main2xUrl }
+        } }
+        """)
+        let raw = (try? decodeField(data["animes"], as: [ShikiRelatedRef].self)) ?? []
+        let sorted = sortFranchiseEntries(raw)
+        if franchiseCache.count >= 64 { franchiseCache.removeAll() }
+        franchiseCache[clean] = (Date(), sorted)
+        return sorted
+    }
+
+    func byStudio(studioId: String, limit: Int = 40) async throws -> [ShikiAnime] {
+        let clean = studioId.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "\"", with: "")
+        guard !clean.isEmpty else { return [] }
+        if let hit = studioCache[clean], Date().timeIntervalSince(hit.0) < 600 {
+            return hit.1
+        }
+        let data = try await query("""
+        { animes(studio: "\(clean)", order: popularity, limit: \(limit), censored: false) {
+            id name russian kind score status episodes episodesAired
+            airedOn { year } poster { originalUrl mainUrl main2xUrl }
+        } }
+        """)
+        let raw = (try? decodeField(data["animes"], as: [ShikiAnime].self)) ?? []
+        var seen = Set<String>()
+        let filtered = raw
+            .filter { !franchiseSkipKinds.contains($0.kind ?? "") }
+            .filter { seen.insert($0.id).inserted }
+        if studioCache.count >= 64 { studioCache.removeAll() }
+        studioCache[clean] = (Date(), filtered)
+        return filtered
+    }
+
+    func cachedSchedule() -> [ShikiAnime]? {
+        scheduleCache?.animes ?? offlineCache?.readSchedule()?.animes
+    }
+
+    func ongoingSchedule(extraMalIds: [Int64] = [], forceRefresh: Bool = false) async throws -> [ShikiAnime] {
+        let wanted = Set(extraMalIds.filter { $0 > 0 })
+        if !forceRefresh, let hit = scheduleCache,
+           Date().timeIntervalSince(hit.savedAt) < 900,
+           wanted.isSubset(of: hit.wanted) {
+            return hit.animes
+        }
+
         let fields = """
             id name russian kind score status episodes episodesAired nextEpisodeAt
             airedOn { year } poster { originalUrl mainUrl main2xUrl }
         """
-        let popData = try await query("""
-        { animes(status: "ongoing", order: popularity, limit: 50, censored: false) { \(fields) } }
-        """)
-        let popular = try decodeField(popData["animes"], as: [ShikiAnime].self)
-        let have = Set(popular.map(\.id))
-        let missing = Array(Set(extraMalIds.filter { $0 > 0 && !have.contains(String($0)) }).prefix(50))
+        do {
+            let popData = try await query("""
+            { animes(status: "ongoing", order: popularity, limit: 50, censored: false) { \(fields) } }
+            """)
+            let popular = try decodeField(popData["animes"], as: [ShikiAnime].self)
+            let have = Set(popular.map(\.id))
+            let missing = Array(Set(extraMalIds.filter { $0 > 0 && !have.contains(String($0)) }).prefix(50))
 
-        var extra: [ShikiAnime] = []
-        if !missing.isEmpty {
-            let ids = missing.map(String.init).joined(separator: ",")
-            if let extraData = try? await query("""
-            { animes(ids: "\(ids)", limit: \(missing.count), censored: false) { \(fields) } }
-            """),
-               let decoded = try? decodeField(extraData["animes"], as: [ShikiAnime].self) {
-                extra = decoded
+            var extra: [ShikiAnime] = []
+            if !missing.isEmpty {
+                let ids = missing.map(String.init).joined(separator: ",")
+                if let extraData = try? await query("""
+                { animes(ids: "\(ids)", limit: \(missing.count), censored: false) { \(fields) } }
+                """),
+                   let decoded = try? decodeField(extraData["animes"], as: [ShikiAnime].self) {
+                    extra = decoded
+                }
             }
-        }
 
-        var seen = Set<String>()
-        return (popular + extra).filter { seen.insert($0.id).inserted }
+            var seen = Set<String>()
+            let merged = (popular + extra).filter { seen.insert($0.id).inserted }
+            scheduleCache = (Date(), wanted, merged)
+            offlineCache?.writeSchedule(animes: merged)
+            return merged
+        } catch {
+            if let cached = offlineCache?.readSchedule()?.animes, !cached.isEmpty {
+                return cached
+            }
+            throw error
+        }
     }
 }

@@ -30,6 +30,10 @@ struct InvalidCredentialsError: LocalizedError {
     var errorDescription: String? { "Неверный e-mail или пароль" }
 }
 
+struct CloudflareBlockedError: LocalizedError {
+    var errorDescription: String? { "Зеркало заблокировано проверкой Cloudflare" }
+}
+
 extension Error {
     /// Human-readable Russian error message for UI presentation.
     var userMessage: String {

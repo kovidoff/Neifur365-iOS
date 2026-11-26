@@ -40,6 +40,7 @@ struct PosterView: View {
 }
 
 struct AvatarView: View {
+    @EnvironmentObject private var app: AppContainer
     @EnvironmentObject private var prefs: Prefs
     @State private var avatar: UIImage?
 
@@ -47,7 +48,13 @@ struct AvatarView: View {
     var size: CGFloat = 40
 
     var body: some View {
-        let requests = Anime365Client.avatarRequests(urlString: urlString, activeMirror: prefs.mirror)
+        let requests = Anime365Client.avatarRequests(
+            urlString: urlString,
+            activeMirror: prefs.mirror,
+            customMirrors: prefs.customMirrors,
+            userAgent: app.a365.userAgent,
+            cookieHeader: app.a365.cookies.header()
+        )
         Color.clear
             .background(Nf.surfaceHi)
             .overlay {
@@ -107,7 +114,7 @@ struct AnimePosterCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            PosterView(urlString: series.bestPosterUrl, cornerRadius: 14, alignment: .center, contentMode: .fit)
+            PosterView(urlString: series.bestPosterUrl, cornerRadius: 14, alignment: .top, contentMode: .fill)
                 .frame(width: width, height: posterHeight)
                 .overlay(
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -180,5 +187,21 @@ struct AnimePosterCard: View {
             parts.append("\(series.numberOfEpisodes) эп.")
         }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+}
+
+/// Pulsing placeholder block for skeleton loading states.
+struct SkeletonBlock: View {
+    var cornerRadius: CGFloat = 14
+    @State private var shimmer = false
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .fill(Nf.surfaceHi.opacity(shimmer ? 0.55 : 0.92))
+            .onAppear {
+                withAnimation(.easeInOut(duration: 0.95).repeatForever(autoreverses: true)) {
+                    shimmer = true
+                }
+            }
     }
 }

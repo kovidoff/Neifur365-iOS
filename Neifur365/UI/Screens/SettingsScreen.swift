@@ -1,64 +1,133 @@
+import Nuke
 import SwiftUI
+import UniformTypeIdentifiers
 
-struct SettingsSheet: View {
+struct SettingsScreen: View {
     @EnvironmentObject private var app: AppContainer
     @EnvironmentObject private var account: AccountStore
+    @EnvironmentObject private var lists: ListsStore
     @EnvironmentObject private var prefs: Prefs
+    @EnvironmentObject private var downloads: DownloadManager
+    @EnvironmentObject private var channelPilot: ChannelPilot
+
+    var embeddedInSheet = false
     @Environment(\.dismiss) private var dismiss
 
     @State private var showSignIn = false
+    @State private var showStats = false
     @State private var showLogoutConfirm = false
+    @State private var showClearDownloadsConfirm = false
 
     @State private var mirrorStatuses: [MirrorStatus] = []
     @State private var probingMirrors = false
     @State private var customMirrorInput = ""
 
-    @State private var channelSetup: ChannelSetup?
-    @State private var channelSpeeds: [Int: ChannelSpeed] = [:]
-    @State private var loadingChannels = false
-    @State private var testingChannels = false
-    @State private var switchingChannelId: Int?
-    @State private var channelError: String?
-
     @State private var checkingAlerts = false
 
+    @State private var exportDocument: BackupFileDocument?
+    @State private var showExporter = false
+    @State private var showImporter = false
+    @State private var backupToast: String?
+
     var body: some View {
-        NavigationStack {
-            Form {
-                accountSection
-                playerSection
-                favouriteStudiosSection
-                downloadsSection
-                alertsSection
-                if account.isSignedIn {
-                    channelsSection
+        Group {
+            if embeddedInSheet {
+                NavigationStack {
+                    settingsForm
+                        .toolbar {
+                            ToolbarItem(placement: .confirmationAction) {
+                                Button("Готово") { dismiss() }
+                            }
+                        }
                 }
-                mirrorsSection
-                aboutSection
+            } else {
+                NavigationStack {
+                    settingsForm
+                        .navigationDestination(for: AnimeRoute.self) { route in
+                            AnimePreviewScreen(route: route)
+                        }
+                        .navigationDestination(for: CatalogFilterPreset.self) { preset in
+                            CatalogFilteredScreen(preset: preset)
+                        }
+                }
             }
-            .navigationTitle("Профиль и настройки")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Готово") { dismiss() }
-                }
+        }
+    }
+
+    private var settingsForm: some View {
+        Form {
+            accountSection
+            playerSection
+            favouriteStudiosSection
+            downloadsSection
+            alertsSection
+            if account.isSignedIn {
+                channelsSection
             }
-            .sheet(isPresented: $showSignIn) {
-                SignInSheet()
+            mirrorsSection
+            backupAndCacheSection
+            aboutSection
+        }
+        .scrollContentBackground(.hidden)
+        .background(Nf.ink.ignoresSafeArea())
+        .navigationTitle("Настройки")
+        .navigationBarTitleDisplayMode(embeddedInSheet ? .inline : .large)
+        .sheet(isPresented: $showSignIn) {
+            SignInSheet()
+        }
+        .sheet(isPresented: $showStats) {
+            WatchStatsSheet()
+        }
+        .confirmationDialog("Выйти из аккаунта Anime 365?", isPresented: $showLogoutConfirm, titleVisibility: .visible) {
+            Button("Выйти", role: .destructive) {
+                account.logout()
             }
-            .confirmationDialog("Выйти из аккаунта Anime 365?", isPresented: $showLogoutConfirm, titleVisibility: .visible) {
-                Button("Выйти", role: .destructive) {
-                    account.logout()
-                }
-                Button("Отмена", role: .cancel) {}
+            Button("Отмена", role: .cancel) {}
+        }
+        .confirmationDialog("Удалить все скачанные серии?", isPresented: $showClearDownloadsConfirm, titleVisibility: .visible) {
+            Button("Удалить всё", role: .destructive) {
+                downloads.clearAll()
             }
-            .task {
-                if mirrorStatuses.isEmpty {
-                    await probeMirrors()
-                }
-                if account.isSignedIn && channelSetup == nil {
-                    await loadChannels()
-                }
+            Button("Отмена", role: .cancel) {}
+        }
+        .fileExporter(
+            isPresented: $showExporter,
+            document: exportDocument,
+            contentType: .json,
+            defaultFilename: "neifur365-settings.json"
+        ) { result in
+            switch result {
+            case .success:
+                showToast("Резервная копия сохранена")
+            case .failure(let err):
+                showToast(err.localizedDescription)
+            }
+        }
+        .fileImporter(
+            isPresented: $showImporter,
+            allowedContentTypes: [.json],
+            allowsMultipleSelection: false
+        ) { result in
+            handleImport(result)
+        }
+        .overlay(alignment: .bottom) {
+            if let backupToast {
+                Text(backupToast)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundColor(Nf.text)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .nfGlassCapsule()
+                    .padding(.bottom, 16)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .task {
+            if mirrorStatuses.isEmpty {
+                await probeMirrors()
+            }
+            if account.isSignedIn && channelPilot.state.setup == nil {
+                _ = await channelPilot.load()
             }
         }
     }
@@ -70,7 +139,7 @@ struct SettingsSheet: View {
         Section("Аккаунт Anime 365") {
             if let profile = account.profile {
                 HStack(spacing: 12) {
-                    AvatarView(urlString: profile.avatarUrl, size: 46)
+                    AvatarView(urlString: profile.avatarUrl, size: 48)
                     VStack(alignment: .leading, spacing: 3) {
                         Text(profile.name)
                             .font(.headline)
@@ -79,6 +148,12 @@ struct SettingsSheet: View {
                     }
                 }
                 .padding(.vertical, 4)
+
+                Button {
+                    showStats = true
+                } label: {
+                    Label("Статистика просмотра", systemImage: "chart.bar.xaxis")
+                }
 
                 Button("Обновить профиль") {
                     account.refresh()
@@ -92,7 +167,7 @@ struct SettingsSheet: View {
                     Text(account.expired ? "Сессия истекла" : "Вы не вошли")
                         .font(.headline)
                         .foregroundColor(Nf.text)
-                    Text("Войдите, чтобы видеть списки и смотреть аниме.")
+                    Text("Войдите, чтобы синхронизировать списки и смотреть аниме.")
                         .font(.caption)
                         .foregroundColor(Nf.textDim)
                 }
@@ -105,13 +180,14 @@ struct SettingsSheet: View {
                 }
             }
         }
+        .listRowBackground(Nf.surface)
     }
 
     @ViewBuilder
     private func subscriptionSubtitle(_ profile: Profile) -> some View {
         if profile.subscribed == true {
             if let until = profile.subscribedUntil {
-                Text("Подписка до \(formatRussianDate(until))")
+                Text("Подписка до \(AppFormatters.formatRussianDate(until))")
                     .font(.caption)
                     .foregroundColor(Nf.mint)
             } else {
@@ -133,7 +209,7 @@ struct SettingsSheet: View {
     // MARK: - Player & Subtitles
 
     private var playerSection: some View {
-        Section("Плеер и озвучка") {
+        Section("Плеер и воспроизведение") {
             Picker("Качество по умолчанию", selection: $prefs.quality) {
                 Text("1080p").tag(1080)
                 Text("720p").tag(720)
@@ -153,8 +229,11 @@ struct SettingsSheet: View {
                 Text("30 сек").tag(30)
             }
 
+            Toggle("Пропуск опенингов и эндингов (AniSkip)", isOn: $prefs.aniskipEnabled)
+            Toggle("Нормализация громкости", isOn: $prefs.normalizeAudio)
             Toggle("Ускорение 2× удержанием", isOn: $prefs.holdBoost)
             Toggle("Жесты яркости и громкости", isOn: $prefs.sideGestures)
+            Toggle("Запоминать яркость в плеере", isOn: $prefs.rememberBrightness)
 
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
@@ -167,7 +246,10 @@ struct SettingsSheet: View {
                 Slider(value: $prefs.subScale, in: 0.7...1.5, step: 0.05)
             }
         }
+        .listRowBackground(Nf.surface)
     }
+
+    // MARK: - Favourite Studios
 
     @ViewBuilder
     private var favouriteStudiosSection: some View {
@@ -201,21 +283,49 @@ struct SettingsSheet: View {
             } footer: {
                 Text("Отмечайте студии звёздочкой ★ в списке озвучек — новые тайтлы будут запускаться в них автоматически.")
             }
+            .listRowBackground(Nf.surface)
         }
     }
 
     // MARK: - Downloads
 
     private var downloadsSection: some View {
-        Section("Офлайн-загрузки") {
+        Section {
             Picker("Качество для скачивания", selection: $prefs.downloadQuality) {
                 Text("1080p").tag(1080)
                 Text("720p").tag(720)
                 Text("360p").tag(360)
             }
 
+            Toggle("Скачивать только по Wi‑Fi", isOn: $prefs.wifiOnlyDownloads)
+                .onChange(of: prefs.wifiOnlyDownloads) { _ in
+                    downloads.onNetworkPolicyChanged()
+                }
+
             Toggle("Автоудаление просмотренных", isOn: $prefs.autoDeleteDownloaded)
+
+            NavigationLink {
+                DownloadsScreen()
+            } label: {
+                HStack {
+                    Label("Управление загрузками", systemImage: "arrow.down.circle")
+                    Spacer()
+                    Text(AppFormatters.formatBytes(downloads.totalStorageBytes))
+                        .font(.caption)
+                        .foregroundColor(Nf.textDim)
+                        .monospacedDigit()
+                }
+            }
+
+            if downloads.totalStorageBytes > 0 {
+                Button("Удалить все скачанные серии", role: .destructive) {
+                    showClearDownloadsConfirm = true
+                }
+            }
+        } header: {
+            Text("Офлайн-загрузки")
         }
+        .listRowBackground(Nf.surface)
     }
 
     // MARK: - Alerts
@@ -230,6 +340,7 @@ struct SettingsSheet: View {
             ))
 
             if prefs.alertsEnabled {
+                Toggle("Только моя озвучка", isOn: $prefs.alertsMyStudio)
                 Toggle("Также из «Запланировано»", isOn: $prefs.alertsPlanned)
 
                 Button {
@@ -245,7 +356,7 @@ struct SettingsSheet: View {
                         if checkingAlerts {
                             ProgressView()
                         } else if let checked = prefs.alertsCheckedAt {
-                            Text(formatTime(checked))
+                            Text(AppFormatters.formatClock(checked))
                                 .font(.caption)
                                 .foregroundColor(Nf.textMute)
                         }
@@ -258,22 +369,26 @@ struct SettingsSheet: View {
         } footer: {
             Text("iOS проверяет новые серии в фоне автоматически по системному расписанию.")
         }
+        .listRowBackground(Nf.surface)
     }
 
     // MARK: - Video Channels
 
     private var channelsSection: some View {
-        Section {
-            if loadingChannels && channelSetup == nil {
-                HStack {
-                    ProgressView()
-                    Text("Загрузка каналов…")
-                        .foregroundColor(Nf.textDim)
-                }
-            } else if let setup = channelSetup {
+        let chState = channelPilot.state
+        return Section {
+            Toggle("Автоподбор рабочего канала", isOn: $prefs.channelAuto)
+
+            if let note = chState.note, !note.isEmpty {
+                Text(note)
+                    .font(.caption)
+                    .foregroundColor(chState.pickedByApp ? Nf.mint : Nf.textDim)
+            }
+
+            if let setup = chState.setup {
                 ForEach(setup.channels) { ch in
                     Button {
-                        switchChannel(ch.id)
+                        channelPilot.selectChannel(ch)
                     } label: {
                         HStack(spacing: 10) {
                             VStack(alignment: .leading, spacing: 2) {
@@ -286,13 +401,15 @@ struct SettingsSheet: View {
                                 }
                             }
                             Spacer()
-                            if let speed = channelSpeeds[ch.id] {
+                            if chState.measuring.contains(ch.id) {
+                                ProgressView().scaleEffect(0.8)
+                            } else if let speed = chState.speeds[ch.id] {
                                 Text(speed.label)
                                     .font(.caption.weight(.semibold))
                                     .foregroundColor(speed.works ? Nf.mint : Nf.red)
                                     .monospacedDigit()
                             }
-                            if switchingChannelId == ch.id {
+                            if chState.switchingId == ch.id {
                                 ProgressView().scaleEffect(0.8)
                             } else if setup.current == ch.id {
                                 Image(systemName: "checkmark")
@@ -301,32 +418,45 @@ struct SettingsSheet: View {
                             }
                         }
                     }
-                    .disabled(switchingChannelId != nil)
+                    .disabled(chState.switchingId != nil)
                 }
 
                 Button {
-                    Task { await measureAllChannels() }
+                    if chState.isTesting {
+                        channelPilot.cancelMeasure()
+                    } else {
+                        channelPilot.measureAll()
+                    }
                 } label: {
                     HStack {
-                        Label("Измерить скорость каналов", systemImage: "speedometer")
+                        Label(
+                            chState.isTesting ? "Остановить замер" : "Измерить скорость каналов",
+                            systemImage: chState.isTesting ? "stop.circle" : "speedometer"
+                        )
                         Spacer()
-                        if testingChannels { ProgressView() }
+                        if chState.isTesting { ProgressView() }
                     }
                 }
-                .disabled(testingChannels)
-            } else if let channelError {
-                Text(channelError)
+            } else if let err = chState.loadError {
+                Text(err)
                     .font(.caption)
                     .foregroundColor(Nf.red)
                 Button("Повторить загрузку каналов") {
-                    Task { await loadChannels() }
+                    Task { _ = await channelPilot.load() }
+                }
+            } else {
+                HStack {
+                    ProgressView()
+                    Text("Загрузка каналов…")
+                        .foregroundColor(Nf.textDim)
                 }
             }
         } header: {
             Text("Видеоканалы Anime 365")
         } footer: {
-            Text("Если видео долго буферизуется или не запускается — выберите другой CDN-канал.")
+            Text("Если поток буферизуется или не запускается, приложение автоматически подберёт рабочий CDN-канал.")
         }
+        .listRowBackground(Nf.surface)
     }
 
     // MARK: - Mirrors
@@ -428,6 +558,44 @@ struct SettingsSheet: View {
         } footer: {
             Text("Сессия общая для всех зеркал — переключение не разлогинивает аккаунт.")
         }
+        .listRowBackground(Nf.surface)
+    }
+
+    // MARK: - Backup & Cache
+
+    private var backupAndCacheSection: some View {
+        Section {
+            Button {
+                do {
+                    let data = try SettingsBackup.exportJSON(from: prefs)
+                    exportDocument = BackupFileDocument(data: data)
+                    showExporter = true
+                } catch {
+                    showToast(error.localizedDescription)
+                }
+            } label: {
+                Label("Экспорт настроек в JSON", systemImage: "square.and.arrow.up")
+            }
+
+            Button {
+                showImporter = true
+            } label: {
+                Label("Импорт настроек из JSON", systemImage: "square.and.arrow.down")
+            }
+
+            Button {
+                URLCache.shared.removeAllCachedResponses()
+                ImagePipeline.shared.cache.removeAll()
+                showToast("Кеш изображений и запросов очищен")
+            } label: {
+                Label("Очистить кеш постеров", systemImage: "sparkles.rectangle.stack")
+            }
+        } header: {
+            Text("Данные и резервная копия")
+        } footer: {
+            Text("Резервная копия сохраняет настройки плеера, фильтры, любимые студии и зеркала без учётных данных.")
+        }
+        .listRowBackground(Nf.surface)
     }
 
     // MARK: - About
@@ -455,6 +623,7 @@ struct SettingsSheet: View {
                     .foregroundColor(Nf.textDim)
             }
         }
+        .listRowBackground(Nf.surface)
     }
 
     // MARK: - Helpers
@@ -465,40 +634,32 @@ struct SettingsSheet: View {
         probingMirrors = false
     }
 
-    private func loadChannels() async {
-        loadingChannels = true
-        channelError = nil
-        do {
-            channelSetup = try await app.a365.channels()
-        } catch {
-            channelError = error.userMessage
-        }
-        loadingChannels = false
-    }
-
-    private func switchChannel(_ id: Int) {
-        switchingChannelId = id
-        Task {
+    private func handleImport(_ result: Result<[URL], Error>) {
+        switch result {
+        case .failure(let err):
+            showToast(err.localizedDescription)
+        case .success(let urls):
+            guard let url = urls.first else { return }
+            let accessed = url.startAccessingSecurityScopedResource()
+            defer { if accessed { url.stopAccessingSecurityScopedResource() } }
             do {
-                try await app.a365.setChannel(id: id)
-                if let cur = channelSetup {
-                    channelSetup = ChannelSetup(channels: cur.channels, current: id, fromRussia: cur.fromRussia)
-                }
+                let data = try Data(contentsOf: url)
+                try SettingsBackup.importJSON(data, into: prefs)
+                showToast("Настройки импортированы")
             } catch {
-                channelError = error.userMessage
+                showToast("Неверный файл настроек")
             }
-            switchingChannelId = nil
         }
     }
 
-    private func measureAllChannels() async {
-        guard let channels = channelSetup?.channels else { return }
-        testingChannels = true
-        for ch in channels {
-            let speed = await app.a365.measure(channel: ch)
-            channelSpeeds[ch.id] = speed
+    private func showToast(_ text: String) {
+        withAnimation { backupToast = text }
+        Task {
+            try? await Task.sleep(nanoseconds: 2_600_000_000)
+            if backupToast == text {
+                withAnimation { backupToast = nil }
+            }
         }
-        testingChannels = false
     }
 
     private func healthColor(_ h: MirrorHealth) -> Color {
@@ -516,23 +677,5 @@ struct SettingsSheet: View {
         case .blocked: return "Cloudflare"
         case .down: return "недоступно"
         }
-    }
-
-    private func formatRussianDate(_ iso: String) -> String {
-        let inFmt = DateFormatter()
-        inFmt.calendar = Calendar(identifier: .gregorian)
-        inFmt.dateFormat = "yyyy-MM-dd"
-        guard let date = inFmt.date(from: iso) else { return iso }
-        let outFmt = DateFormatter()
-        outFmt.locale = Locale(identifier: "ru_RU")
-        outFmt.dateStyle = .long
-        outFmt.timeStyle = .none
-        return outFmt.string(from: date)
-    }
-
-    private func formatTime(_ date: Date) -> String {
-        let fmt = DateFormatter()
-        fmt.dateFormat = "HH:mm"
-        return fmt.string(from: date)
     }
 }
