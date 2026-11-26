@@ -63,19 +63,7 @@ struct Neifur365App: App {
     var body: some Scene {
         let container = appDelegate.container
         WindowGroup {
-            RootView(pendingDeepLinkSeriesId: $appDelegate.pendingDeepLinkSeriesId)
-                .environmentObject(container)
-                .environmentObject(container.prefs)
-                .environmentObject(container.account)
-                .environmentObject(container.lists)
-                .environmentObject(container.downloads)
-                .environmentObject(container.channelPilot)
-                .environmentObject(container.network)
-                .preferredColorScheme(.dark)
-                .tint(Nf.violet)
-                .onAppear {
-                    container.downloads.restoreTasks()
-                }
+            AppSceneContent(appDelegate: appDelegate)
         }
         .onChange(of: scenePhase) { phase in
             if phase == .background {
@@ -84,5 +72,26 @@ struct Neifur365App: App {
                 Task { await container.account.flushPendingWatches() }
             }
         }
+    }
+}
+
+private struct AppSceneContent: View {
+    @ObservedObject var appDelegate: NeifurAppDelegate
+
+    var body: some View {
+        let container = appDelegate.container
+        RootView(pendingDeepLinkSeriesId: $appDelegate.pendingDeepLinkSeriesId)
+            .environmentObject(container)
+            .environmentObject(container.prefs)
+            .environmentObject(container.account)
+            .environmentObject(container.lists)
+            .environmentObject(container.downloads)
+            .environmentObject(container.channelPilot)
+            .environmentObject(container.network)
+            .preferredColorScheme(.dark)
+            .tint(Nf.violet)
+            .onAppear {
+                container.downloads.restoreTasks()
+            }
     }
 }
