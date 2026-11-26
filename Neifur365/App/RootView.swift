@@ -5,6 +5,7 @@ enum RootTab: String, CaseIterable, Identifiable {
     case library
     case catalog
     case settings
+    case search
 
     var id: String { rawValue }
 
@@ -14,6 +15,7 @@ enum RootTab: String, CaseIterable, Identifiable {
         case .library: return "Списки"
         case .catalog: return "Каталог"
         case .settings: return "Настройки"
+        case .search: return "Поиск"
         }
     }
 
@@ -23,6 +25,7 @@ enum RootTab: String, CaseIterable, Identifiable {
         case .library: return "bookmark"
         case .catalog: return "square.grid.2x2"
         case .settings: return "gearshape"
+        case .search: return "magnifyingglass"
         }
     }
 }
@@ -95,6 +98,9 @@ struct RootView: View {
                 Tab(RootTab.settings.title, systemImage: RootTab.settings.icon, value: .settings) {
                     SettingsScreen()
                 }
+                Tab(RootTab.search.title, systemImage: RootTab.search.icon, value: .search, role: .search) {
+                    SearchScreen()
+                }
             }
             .tabBarMinimizeBehavior(.onScrollDown)
         } else {
@@ -122,6 +128,12 @@ struct RootView: View {
                         Label(RootTab.settings.title, systemImage: RootTab.settings.icon)
                     }
                     .tag(RootTab.settings)
+
+                SearchScreen()
+                    .tabItem {
+                        Label(RootTab.search.title, systemImage: RootTab.search.icon)
+                    }
+                    .tag(RootTab.search)
             }
         }
     }

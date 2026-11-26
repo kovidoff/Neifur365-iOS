@@ -76,7 +76,11 @@ struct LibraryScreen: View {
                     .background(Nf.ink.ignoresSafeArea())
                 } else {
                     signedInContent
-                        .searchable(text: $searchQuery, prompt: "Поиск в списке")
+                        .searchable(
+                            text: $searchQuery,
+                            placement: .navigationBarDrawer(displayMode: .always),
+                            prompt: "Поиск в списке"
+                        )
                 }
             }
             .navigationTitle("Списки")

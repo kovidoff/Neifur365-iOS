@@ -285,7 +285,11 @@ private struct CatalogContentView: View {
         .background(Nf.ink.ignoresSafeArea())
         .navigationTitle(preset?.title ?? "Каталог")
         .navigationBarTitleDisplayMode(preset == nil ? .large : .inline)
-        .searchable(text: $vm.query, prompt: "Поиск аниме…") {
+        .searchable(
+            text: $vm.query,
+            placement: .navigationBarDrawer(displayMode: .always),
+            prompt: "Поиск аниме…"
+        ) {
             if !prefs.recentSearches.isEmpty && vm.query.trimmingCharacters(in: .whitespaces).isEmpty {
                 Section("Недавние запросы") {
                     ForEach(prefs.recentSearches, id: \.self) { recent in
@@ -679,7 +683,7 @@ private struct CatalogContentView: View {
     }
 }
 
-private struct CatalogGridCard: View {
+struct CatalogGridCard: View {
     let series: Series
     let listStatus: ListStatus?
 

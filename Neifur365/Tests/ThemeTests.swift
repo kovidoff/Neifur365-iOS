@@ -10,6 +10,6 @@ final class ThemeTests: XCTestCase {
     }
 
     func testRootTabsCount() {
-        XCTAssertEqual(RootTab.allCases.count, 4)
+        XCTAssertEqual(RootTab.allCases.count, 5)
     }
 }
