@@ -3,7 +3,7 @@ import UIKit
 import UserNotifications
 
 @MainActor
-final class NeifurAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
+final class NeifurAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate, ObservableObject {
     let container = AppContainer()
     @Published var pendingDeepLinkSeriesId: Int64?
 

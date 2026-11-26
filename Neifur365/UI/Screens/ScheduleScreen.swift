@@ -163,7 +163,7 @@ final class ScheduleViewModel: ObservableObject {
             }
         }
 
-        if days.isEmpty, let cached = shikimori.cachedSchedule() {
+        if days.isEmpty, let cached = await shikimori.cachedSchedule() {
             days = ScheduleBuilder.buildWeekly(animes: cached, byMalId: byMalId)
         }
 
@@ -257,7 +257,7 @@ struct ScheduleScreen: View {
                     Section {
                         ForEach(currentItems) { item in
                             NavigationLink(value: item.route) {
-                                ScheduleRowView(item: item, timeText: AppFormatters.formatClock(item.airAt))
+                                ScheduleRowView(item: item, timeText: AppFormatters.timeHHMM.string(from: item.airAt))
                             }
                             .listRowBackground(Nf.surface)
                             .listRowSeparatorTint(Nf.line)

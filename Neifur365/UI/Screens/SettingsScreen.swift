@@ -356,7 +356,7 @@ struct SettingsScreen: View {
                         if checkingAlerts {
                             ProgressView()
                         } else if let checked = prefs.alertsCheckedAt {
-                            Text(AppFormatters.formatClock(checked))
+                            Text(AppFormatters.timeHHMM.string(from: checked))
                                 .font(.caption)
                                 .foregroundColor(Nf.textMute)
                         }

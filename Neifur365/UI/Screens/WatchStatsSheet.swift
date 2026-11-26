@@ -104,7 +104,7 @@ struct WatchStatsSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        let stats = computeWatchStats(items: lists.all)
+        let stats = computeWatchStats(items: Array(lists.titles.values))
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {

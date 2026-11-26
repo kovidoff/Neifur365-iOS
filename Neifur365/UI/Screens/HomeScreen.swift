@@ -25,7 +25,7 @@ final class HomeViewModel: ObservableObject {
         defer { loading = false }
         errorMessage = nil
 
-        if let cached = shikimori.cachedSchedule(), todayItems.isEmpty {
+        if let cached = await shikimori.cachedSchedule(), todayItems.isEmpty {
             todayItems = buildTodayItems(ongoing: cached, lists: lists)
         }
 
